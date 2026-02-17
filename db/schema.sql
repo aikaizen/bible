@@ -188,3 +188,15 @@ BEGIN
 END
 $$;
 CREATE INDEX IF NOT EXISTS idx_weeks_group_start ON weeks(group_id, start_date);
+
+-- Google OAuth: stable account linking via Google sub ID
+DO $$
+BEGIN
+  IF NOT EXISTS (
+    SELECT 1 FROM information_schema.columns
+    WHERE table_name = 'users' AND column_name = 'google_id'
+  ) THEN
+    ALTER TABLE users ADD COLUMN google_id TEXT UNIQUE;
+  END IF;
+END
+$$;
