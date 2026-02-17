@@ -1,13 +1,9 @@
 import { badRequest, handleRouteError, ok, parseBody } from "@/lib/api";
+import { getAuthUser } from "@/lib/auth-helpers";
 import { deleteComment, editComment } from "@/lib/service";
 
 type EditCommentBody = {
-  userId: string;
   text: string;
-};
-
-type DeleteCommentBody = {
-  userId: string;
 };
 
 export async function PATCH(
@@ -15,14 +11,15 @@ export async function PATCH(
   context: { params: Promise<{ commentId: string }> },
 ) {
   try {
+    const user = await getAuthUser();
     const { commentId } = await context.params;
     const body = await parseBody<EditCommentBody>(request);
 
-    if (!body.userId || !body.text) {
-      return badRequest("userId and text are required", 422);
+    if (!body.text) {
+      return badRequest("text is required", 422);
     }
 
-    const data = await editComment({ commentId, userId: body.userId, text: body.text });
+    const data = await editComment({ commentId, userId: user.id, text: body.text });
     return ok(data);
   } catch (error) {
     return handleRouteError(error);
@@ -30,18 +27,14 @@ export async function PATCH(
 }
 
 export async function DELETE(
-  request: Request,
+  _request: Request,
   context: { params: Promise<{ commentId: string }> },
 ) {
   try {
+    const user = await getAuthUser();
     const { commentId } = await context.params;
-    const body = await parseBody<DeleteCommentBody>(request);
 
-    if (!body.userId) {
-      return badRequest("userId is required", 422);
-    }
-
-    const data = await deleteComment({ commentId, userId: body.userId });
+    const data = await deleteComment({ commentId, userId: user.id });
     return ok(data);
   } catch (error) {
     return handleRouteError(error);

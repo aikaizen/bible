@@ -1,8 +1,8 @@
 import { badRequest, handleRouteError, ok, parseBody } from "@/lib/api";
+import { getAuthUser } from "@/lib/auth-helpers";
 import { castVote } from "@/lib/service";
 
 type VoteBody = {
-  userId: string;
   proposalId: string;
 };
 
@@ -11,14 +11,15 @@ export async function POST(
   context: { params: Promise<{ groupId: string }> },
 ) {
   try {
+    const user = await getAuthUser();
     const { groupId } = await context.params;
     const body = await parseBody<VoteBody>(request);
 
-    if (!body.userId || !body.proposalId) {
-      return badRequest("userId and proposalId are required", 422);
+    if (!body.proposalId) {
+      return badRequest("proposalId is required", 422);
     }
 
-    const data = await castVote({ groupId, userId: body.userId, proposalId: body.proposalId });
+    const data = await castVote({ groupId, userId: user.id, proposalId: body.proposalId });
     return ok(data);
   } catch (error) {
     return handleRouteError(error);

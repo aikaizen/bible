@@ -1,23 +1,16 @@
-import { badRequest, handleRouteError, ok, parseBody } from "@/lib/api";
+import { handleRouteError, ok } from "@/lib/api";
+import { getAuthUser } from "@/lib/auth-helpers";
 import { startNewVote } from "@/lib/service";
 
-type NewVoteBody = {
-  userId: string;
-};
-
 export async function POST(
-  request: Request,
+  _request: Request,
   context: { params: Promise<{ groupId: string }> },
 ) {
   try {
+    const user = await getAuthUser();
     const { groupId } = await context.params;
-    const body = await parseBody<NewVoteBody>(request);
 
-    if (!body.userId) {
-      return badRequest("userId is required", 422);
-    }
-
-    const data = await startNewVote({ groupId, userId: body.userId });
+    const data = await startNewVote({ groupId, userId: user.id });
     return ok(data);
   } catch (error) {
     return handleRouteError(error);

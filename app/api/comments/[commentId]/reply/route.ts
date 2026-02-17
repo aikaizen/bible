@@ -1,8 +1,8 @@
 import { badRequest, handleRouteError, ok, parseBody } from "@/lib/api";
+import { getAuthUser } from "@/lib/auth-helpers";
 import { createComment } from "@/lib/service";
 
 type ReplyBody = {
-  userId: string;
   readingItemId: string;
   text: string;
 };
@@ -12,16 +12,17 @@ export async function POST(
   context: { params: Promise<{ commentId: string }> },
 ) {
   try {
+    const user = await getAuthUser();
     const { commentId } = await context.params;
     const body = await parseBody<ReplyBody>(request);
 
-    if (!body.userId || !body.readingItemId || !body.text) {
-      return badRequest("userId, readingItemId, and text are required", 422);
+    if (!body.readingItemId || !body.text) {
+      return badRequest("readingItemId and text are required", 422);
     }
 
     const data = await createComment({
       readingItemId: body.readingItemId,
-      userId: body.userId,
+      userId: user.id,
       text: body.text,
       parentId: commentId,
     });

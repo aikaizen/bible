@@ -1,8 +1,8 @@
-import { badRequest, handleRouteError, ok, parseBody } from "@/lib/api";
+import { handleRouteError, ok, parseBody } from "@/lib/api";
+import { getAuthUser } from "@/lib/auth-helpers";
 import { resolveCurrentWeek } from "@/lib/service";
 
 type ResolveBody = {
-  userId: string;
   proposalId?: string;
 };
 
@@ -11,14 +11,11 @@ export async function POST(
   context: { params: Promise<{ groupId: string }> },
 ) {
   try {
+    const user = await getAuthUser();
     const { groupId } = await context.params;
     const body = await parseBody<ResolveBody>(request);
 
-    if (!body.userId) {
-      return badRequest("userId is required", 422);
-    }
-
-    const data = await resolveCurrentWeek(groupId, body.userId, body.proposalId);
+    const data = await resolveCurrentWeek(groupId, user.id, body.proposalId);
     return ok(data);
   } catch (error) {
     return handleRouteError(error);

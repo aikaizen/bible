@@ -1,13 +1,11 @@
 import { handleRouteError, ok } from "@/lib/api";
+import { getAuthUser } from "@/lib/auth-helpers";
 import { getUserGroups } from "@/lib/service";
 
-export async function GET(
-  _request: Request,
-  context: { params: Promise<{ userId: string }> },
-) {
+export async function GET() {
   try {
-    const { userId } = await context.params;
-    const rows = await getUserGroups(userId);
+    const user = await getAuthUser();
+    const rows = await getUserGroups(user.id);
     const groups = rows.map((row) => ({
       id: row.id,
       name: row.name,

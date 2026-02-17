@@ -11,6 +11,9 @@ export function ok<T>(data: T, status = 200) {
 }
 
 export function handleRouteError(error: unknown) {
+  if (error instanceof Error && error.message === "Unauthorized") {
+    return badRequest("Unauthorized", 401);
+  }
   if (error instanceof ServiceError) {
     return badRequest(error.message, error.status);
   }
