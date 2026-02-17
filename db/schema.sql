@@ -174,3 +174,17 @@ BEGIN
   END IF;
 END
 $$;
+
+-- Support multiple vote rounds per group (mid-week new votes after resolution)
+DO $$
+BEGIN
+  IF EXISTS (
+    SELECT 1 FROM information_schema.table_constraints
+    WHERE table_name = 'weeks' AND constraint_type = 'UNIQUE'
+    AND constraint_name = 'weeks_group_id_start_date_key'
+  ) THEN
+    ALTER TABLE weeks DROP CONSTRAINT weeks_group_id_start_date_key;
+  END IF;
+END
+$$;
+CREATE INDEX IF NOT EXISTS idx_weeks_group_start ON weeks(group_id, start_date);

@@ -189,20 +189,35 @@ async function insertSeedProposals(
   }
 }
 
+const WEEK_SELECT = `SELECT id, group_id, start_date::text, voting_close_at::text, resolved_reading_id, status, reminder_sent_at::text FROM weeks`;
+
+async function getActiveWeek(groupId: string): Promise<WeekRow | null> {
+  return dbQueryOne<WeekRow>(
+    `${WEEK_SELECT} WHERE group_id = $1 AND status != 'RESOLVED' ORDER BY created_at DESC LIMIT 1`,
+    [groupId],
+  );
+}
+
 async function ensureCurrentWeekExists(groupId: string): Promise<WeekRow> {
+  // Return any existing active (non-resolved) week
+  const active = await getActiveWeek(groupId);
+  if (active) return active;
+
+  // No active week — create one for the current calendar week
   const group = await getGroup(groupId);
   const meta = await getCurrentWeekMeta(groupId);
 
   const inserted = await dbQueryOne<{ id: string }>(
     `INSERT INTO weeks(group_id, start_date, voting_close_at, status)
-     VALUES ($1, $2::date, $3::timestamptz, 'VOTING_OPEN')
-     ON CONFLICT (group_id, start_date) DO NOTHING
+     SELECT $1, $2::date, $3::timestamptz, 'VOTING_OPEN'
+     WHERE NOT EXISTS (
+       SELECT 1 FROM weeks WHERE group_id = $1 AND status != 'RESOLVED'
+     )
      RETURNING id`,
     [groupId, meta.startDate, meta.closeAt],
   );
 
   if (inserted) {
-    // Insert seed proposals for the new week
     await insertSeedProposals(groupId, inserted.id, group.owner_id);
 
     await notifyGroupMembers(
@@ -212,20 +227,26 @@ async function ensureCurrentWeekExists(groupId: string): Promise<WeekRow> {
       { groupId, weekId: inserted.id, startDate: meta.startDate, closeAt: meta.closeAt },
       undefined,
     );
+
+    const week = await dbQueryOne<WeekRow>(
+      `${WEEK_SELECT} WHERE id = $1`,
+      [inserted.id],
+    );
+    if (!week) throw new ServiceError("Unable to create or load current week", 500);
+    return week;
   }
 
-  const week = await dbQueryOne<WeekRow>(
-    `SELECT id, group_id, start_date::text, voting_close_at::text, resolved_reading_id, status, reminder_sent_at::text
-     FROM weeks
-     WHERE group_id = $1 AND start_date = $2::date`,
-    [group.id, meta.startDate],
+  // Race condition: another request created the week between our check and insert
+  const fallback = await getActiveWeek(groupId);
+  if (fallback) return fallback;
+
+  // All weeks resolved and we couldn't create — return latest
+  const latest = await dbQueryOne<WeekRow>(
+    `${WEEK_SELECT} WHERE group_id = $1 ORDER BY created_at DESC LIMIT 1`,
+    [groupId],
   );
-
-  if (!week) {
-    throw new ServiceError("Unable to create or load current week", 500);
-  }
-
-  return week;
+  if (!latest) throw new ServiceError("Unable to create or load current week", 500);
+  return latest;
 }
 
 function isPast(iso: string): boolean {
@@ -637,7 +658,8 @@ export async function addProposal(params: {
   reference: string;
   note?: string;
 }) {
-  const week = await ensureCurrentWeek(params.groupId);
+  let week = await getActiveWeek(params.groupId);
+  if (!week) week = await ensureCurrentWeek(params.groupId);
   await requireMembership(params.groupId, params.userId);
 
   if (week.status !== "VOTING_OPEN" || isPast(week.voting_close_at)) {
@@ -690,7 +712,9 @@ export async function removeProposal(params: { groupId: string; userId: string; 
 }
 
 export async function castVote(params: { groupId: string; userId: string; proposalId: string }) {
-  const week = await ensureCurrentWeek(params.groupId);
+  // Fast path: try to get active week without full ensureCurrentWeek
+  let week = await getActiveWeek(params.groupId);
+  if (!week) week = await ensureCurrentWeek(params.groupId);
   await requireMembership(params.groupId, params.userId);
 
   if (week.status !== "VOTING_OPEN" || isPast(week.voting_close_at)) {
@@ -698,11 +722,8 @@ export async function castVote(params: { groupId: string; userId: string; propos
   }
 
   const exists = await dbQueryOne<{ id: string }>(
-    `SELECT p.id
-     FROM proposals p
-     WHERE p.id = $1
-       AND p.week_id = $2
-       AND p.deleted_at IS NULL`,
+    `SELECT p.id FROM proposals p
+     WHERE p.id = $1 AND p.week_id = $2 AND p.deleted_at IS NULL`,
     [params.proposalId, week.id],
   );
 
@@ -718,7 +739,24 @@ export async function castVote(params: { groupId: string; userId: string; propos
     [week.id, params.proposalId, params.userId],
   );
 
-  return { ok: true };
+  // Auto-resolve: check if all members have voted
+  const [voteResult, memberResult] = await Promise.all([
+    dbQueryOne<{ count: string }>(`SELECT COUNT(*)::text AS count FROM votes WHERE week_id = $1`, [week.id]),
+    dbQueryOne<{ count: string }>(`SELECT COUNT(*)::text AS count FROM group_members WHERE group_id = $1`, [params.groupId]),
+  ]);
+  const voteCount = Number(voteResult?.count ?? 0);
+  const memberCount = Number(memberResult?.count ?? 0);
+
+  if (voteCount >= memberCount && memberCount > 0) {
+    const group = await getGroup(params.groupId);
+    const winner = await calculateWinner(week.id, group.tie_policy);
+    if (winner.proposalId && winner.status !== "PENDING_MANUAL") {
+      await finalizeWeek(week.id, winner.proposalId);
+      return { ok: true, autoResolved: true };
+    }
+  }
+
+  return { ok: true, autoResolved: false };
 }
 
 export async function setReadMark(params: {
@@ -1198,6 +1236,94 @@ async function ensureDemoData() {
       client,
     );
   });
+}
+
+export async function rerollSeedProposal(params: {
+  groupId: string;
+  userId: string;
+  proposalId: string;
+}) {
+  await requireAdmin(params.groupId, params.userId);
+
+  const proposal = await dbQueryOne<{ id: string; week_id: string; is_seed: boolean }>(
+    `SELECT p.id, p.week_id, p.is_seed
+     FROM proposals p
+     JOIN weeks w ON w.id = p.week_id
+     WHERE p.id = $1 AND w.group_id = $2 AND p.deleted_at IS NULL`,
+    [params.proposalId, params.groupId],
+  );
+
+  if (!proposal) throw new ServiceError("Proposal not found", 404);
+  if (!proposal.is_seed) throw new ServiceError("Only seed proposals can be rerolled", 400);
+
+  // Soft-delete the old seed
+  await dbQuery(`UPDATE proposals SET deleted_at = NOW() WHERE id = $1`, [params.proposalId]);
+
+  // Get already-used references (read + current proposals)
+  const [pastRefs, currentRefs] = await Promise.all([
+    dbQuery<{ reference: string }>(
+      `SELECT DISTINCT ri.reference FROM reading_items ri
+       JOIN weeks w ON w.id = ri.week_id WHERE w.group_id = $1`,
+      [params.groupId],
+    ),
+    dbQuery<{ reference: string }>(
+      `SELECT reference FROM proposals WHERE week_id = $1 AND deleted_at IS NULL`,
+      [proposal.week_id],
+    ),
+  ]);
+
+  const excluded = [...pastRefs.map((r) => r.reference), ...currentRefs.map((r) => r.reference)];
+  const seeds = pickSeedPassages(1, excluded);
+
+  if (seeds.length > 0) {
+    const group = await getGroup(params.groupId);
+    await dbQuery(
+      `INSERT INTO proposals(week_id, proposer_id, reference, note, is_seed)
+       VALUES ($1, $2, $3, $4, TRUE)`,
+      [proposal.week_id, group.owner_id, seeds[0].reference, seeds[0].note],
+    );
+  }
+
+  return { ok: true };
+}
+
+export async function startNewVote(params: { groupId: string; userId: string }) {
+  await requireMembership(params.groupId, params.userId);
+
+  // Verify current week is resolved
+  const latestWeek = await dbQueryOne<WeekRow>(
+    `${WEEK_SELECT} WHERE group_id = $1 ORDER BY created_at DESC LIMIT 1`,
+    [params.groupId],
+  );
+
+  if (!latestWeek) throw new ServiceError("No previous week found", 400);
+  if (latestWeek.status !== "RESOLVED") {
+    throw new ServiceError("Current vote must be resolved before starting a new one", 400);
+  }
+
+  const group = await getGroup(params.groupId);
+  const votingHours = group.voting_duration_hours;
+
+  const newWeek = await dbQueryOne<{ id: string }>(
+    `INSERT INTO weeks(group_id, start_date, voting_close_at, status)
+     VALUES ($1, CURRENT_DATE, NOW() + make_interval(hours => $2), 'VOTING_OPEN')
+     RETURNING id`,
+    [params.groupId, votingHours],
+  );
+
+  if (!newWeek) throw new ServiceError("Failed to create new vote round", 500);
+
+  await insertSeedProposals(params.groupId, newWeek.id, group.owner_id);
+
+  await notifyGroupMembers(
+    params.groupId,
+    "VOTING_OPENED",
+    "A new vote round has started!",
+    { groupId: params.groupId, weekId: newWeek.id },
+    params.userId,
+  );
+
+  return { weekId: newWeek.id };
 }
 
 export async function getUserGroups(userId: string) {

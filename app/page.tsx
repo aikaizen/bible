@@ -178,6 +178,11 @@ export default function Home() {
   const [bibleText, setBibleText] = useState<BibleText | null>(null);
   const [bibleLoading, setBibleLoading] = useState(false);
 
+  // Proposal previews (#13)
+  const [previewOpen, setPreviewOpen] = useState<Record<string, boolean>>({});
+  const [previewTexts, setPreviewTexts] = useState<Record<string, BibleText | null>>({});
+  const [previewLoading, setPreviewLoading] = useState<Record<string, boolean>>({});
+
   // Auth
   const [authMode, setAuthMode] = useState<"login" | "register">("login");
   const [authEmail, setAuthEmail] = useState("");
@@ -225,6 +230,25 @@ export default function Home() {
     } finally {
       setBibleLoading(false);
     }
+  }
+
+  async function loadProposalPreview(proposalId: string, reference: string) {
+    if (previewTexts[proposalId] !== undefined) return;
+    setPreviewLoading((prev) => ({ ...prev, [proposalId]: true }));
+    try {
+      const data = await api<BibleText>(`/api/bible?reference=${encodeURIComponent(reference)}`);
+      setPreviewTexts((prev) => ({ ...prev, [proposalId]: data }));
+    } catch {
+      setPreviewTexts((prev) => ({ ...prev, [proposalId]: null }));
+    } finally {
+      setPreviewLoading((prev) => ({ ...prev, [proposalId]: false }));
+    }
+  }
+
+  function togglePreview(proposalId: string, reference: string) {
+    const isOpen = !previewOpen[proposalId];
+    setPreviewOpen((prev) => ({ ...prev, [proposalId]: isOpen }));
+    if (isOpen) loadProposalPreview(proposalId, reference);
   }
 
   async function loadSnapshot(gId: string, uId: string) {
@@ -415,12 +439,45 @@ export default function Home() {
 
   function onVote(proposalId: string) {
     if (!groupId || !selectedUserId) return;
-    void mutate(async () => {
-      await api(`/api/groups/${groupId}/vote`, {
-        method: "POST",
-        body: JSON.stringify({ userId: selectedUserId, proposalId }),
-      });
+    // Optimistic UI: update vote immediately
+    setSnapshot((prev) => {
+      if (!prev) return prev;
+      const userName = prev.members.find((m) => m.id === selectedUserId)?.name ?? "";
+      return {
+        ...prev,
+        myVoteProposalId: proposalId,
+        proposals: prev.proposals.map((p) => {
+          const hadMyVote = prev.myVoteProposalId === p.id;
+          const getsMyVote = p.id === proposalId;
+          const newVoters = hadMyVote
+            ? p.voters.filter((v) => v.id !== selectedUserId)
+            : p.voters;
+          return {
+            ...p,
+            voteCount: p.voteCount + (getsMyVote ? 1 : 0) - (hadMyVote ? 1 : 0),
+            voters: getsMyVote ? [...newVoters, { id: selectedUserId, name: userName }] : newVoters,
+          };
+        }),
+      };
     });
+    void (async () => {
+      try {
+        setSubmitting(true);
+        const result = await api<{ ok: boolean; autoResolved?: boolean }>(`/api/groups/${groupId}/vote`, {
+          method: "POST",
+          body: JSON.stringify({ userId: selectedUserId, proposalId }),
+        });
+        if (result.autoResolved) {
+          setTab("reading");
+        }
+        await refreshData();
+      } catch (err) {
+        setError(err instanceof Error ? err.message : "Vote failed");
+        await refreshData(); // Revert optimistic update
+      } finally {
+        setSubmitting(false);
+      }
+    })();
   }
 
   function onCreateProposal() {
@@ -545,6 +602,27 @@ export default function Home() {
         body: JSON.stringify({ userId: selectedUserId }),
       });
       setInviteToken(payload.token);
+    });
+  }
+
+  function onReroll(proposalId: string) {
+    if (!groupId || !selectedUserId) return;
+    void mutate(async () => {
+      await api(`/api/groups/${groupId}/proposals/reroll`, {
+        method: "POST",
+        body: JSON.stringify({ userId: selectedUserId, proposalId }),
+      });
+    });
+  }
+
+  function onStartNewVote() {
+    if (!groupId || !selectedUserId) return;
+    void mutate(async () => {
+      await api(`/api/groups/${groupId}/new-vote`, {
+        method: "POST",
+        body: JSON.stringify({ userId: selectedUserId }),
+      });
+      setTab("vote");
     });
   }
 
@@ -946,6 +1024,13 @@ export default function Home() {
                           {snapshot.myVoteProposalId === p.id && <IconCheck />}
                           {snapshot.myVoteProposalId === p.id ? "Voted" : "Vote"}
                         </button>
+                        <button
+                          className="btn btn-sm"
+                          onClick={() => togglePreview(p.id, p.reference)}
+                          type="button"
+                        >
+                          {previewOpen[p.id] ? "Hide" : "Preview"}
+                        </button>
                         {(isAdmin || p.proposerId === selectedUserId) && !p.isSeed && (
                           <button
                             className="btn btn-danger btn-sm"
@@ -964,16 +1049,11 @@ export default function Home() {
                         {isAdmin && p.isSeed && (
                           <button
                             className="btn btn-sm"
-                            onClick={() => void mutate(async () => {
-                              await api(`/api/groups/${groupId}/proposals`, {
-                                method: "DELETE",
-                                body: JSON.stringify({ userId: selectedUserId, proposalId: p.id }),
-                              });
-                            })}
+                            onClick={() => onReroll(p.id)}
                             disabled={submitting}
                             type="button"
                           >
-                            Dismiss
+                            Reroll
                           </button>
                         )}
                         {isAdmin && snapshot.week.status === "PENDING_MANUAL" && (
@@ -982,51 +1062,105 @@ export default function Home() {
                           </button>
                         )}
                       </div>
+
+                      {/* Passage preview */}
+                      {previewOpen[p.id] && (
+                        <div className="proposal-preview">
+                          {previewLoading[p.id] && (
+                            <div className="bible-loading">Loading passage...</div>
+                          )}
+                          {previewTexts[p.id] && previewTexts[p.id]!.verses.length > 0 && (
+                            <div className="bible-text-container" style={{ borderTop: "none", paddingTop: 0, marginTop: 0 }}>
+                              <div className="bible-translation">{previewTexts[p.id]!.translation}</div>
+                              <div className="bible-verses" style={{ fontSize: 15, lineHeight: 1.65 }}>
+                                {previewTexts[p.id]!.verses.map((v) => (
+                                  <span key={v.verse} className="bible-verse">
+                                    <sup className="verse-num">{v.verse}</sup>
+                                    {v.text}{" "}
+                                  </span>
+                                ))}
+                              </div>
+                            </div>
+                          )}
+                          {!previewLoading[p.id] && previewTexts[p.id] === null && (
+                            <div className="text-tertiary" style={{ fontSize: 12, padding: "8px 0" }}>
+                              Could not load passage text.
+                            </div>
+                          )}
+                        </div>
+                      )}
                     </div>
                   ))}
                 </div>
 
                 {/* Propose form */}
-                {!showPropose ? (
-                  <button
-                    className="btn"
-                    onClick={() => setShowPropose(true)}
-                    disabled={snapshot.week.status !== "VOTING_OPEN" || daysLeft <= 0}
-                    type="button"
-                  >
-                    <IconPlus /> Propose passage
-                  </button>
-                ) : (
-                  <div className="card stack">
-                    <input
-                      className="input"
-                      value={newReference}
-                      onChange={(e) => setNewReference(e.target.value)}
-                      placeholder="Reference (e.g. John 3:1-21)"
-                    />
-                    <textarea
-                      className="textarea"
-                      value={newNote}
-                      onChange={(e) => setNewNote(e.target.value)}
-                      maxLength={240}
-                      placeholder="Why this passage this week?"
-                    />
-                    <div className="row">
-                      <button className="btn btn-gold" onClick={onCreateProposal} type="button" disabled={submitting}>Submit</button>
-                      <button className="btn" onClick={() => setShowPropose(false)} type="button">Cancel</button>
-                    </div>
-                  </div>
+                {snapshot.week.status === "VOTING_OPEN" && daysLeft > 0 && (
+                  <>
+                    {!showPropose ? (
+                      <button
+                        className="btn"
+                        onClick={() => setShowPropose(true)}
+                        type="button"
+                      >
+                        <IconPlus /> Propose passage
+                      </button>
+                    ) : (
+                      <div className="card stack">
+                        <div className="passage-helper">
+                          <div className="passage-helper-title">Passage size guide</div>
+                          <div className="passage-helper-text">
+                            Aim for 15-40 verses (about 5-10 min read). A single chapter or a focused section works well.
+                            Format: <strong>Book Chapter:Start-End</strong> (e.g. John 3:1-21, Psalm 23, Romans 8:18-39)
+                          </div>
+                        </div>
+                        <input
+                          className="input"
+                          value={newReference}
+                          onChange={(e) => setNewReference(e.target.value)}
+                          placeholder="Reference (e.g. John 3:1-21)"
+                        />
+                        <textarea
+                          className="textarea"
+                          value={newNote}
+                          onChange={(e) => setNewNote(e.target.value)}
+                          maxLength={240}
+                          placeholder="Why this passage this week?"
+                        />
+                        <div className="row">
+                          <button className="btn btn-gold" onClick={onCreateProposal} type="button" disabled={submitting}>Submit</button>
+                          <button className="btn" onClick={() => setShowPropose(false)} type="button">Cancel</button>
+                        </div>
+                      </div>
+                    )}
+                  </>
                 )}
 
-                {isAdmin && (
+                {/* Admin resolve + New vote */}
+                {isAdmin && snapshot.week.status !== "RESOLVED" && (
                   <button
                     className="btn btn-sm"
                     onClick={() => onResolve()}
-                    disabled={submitting || snapshot.week.status === "RESOLVED"}
+                    disabled={submitting}
                     type="button"
                   >
                     Resolve Now (Admin)
                   </button>
+                )}
+
+                {snapshot.week.status === "RESOLVED" && (
+                  <div className="card stack" style={{ textAlign: "center" }}>
+                    <div className="text-muted">
+                      This week&apos;s vote is resolved. {snapshot.readingItem ? `Reading: ${snapshot.readingItem.reference}` : ""}
+                    </div>
+                    <button
+                      className="btn btn-gold"
+                      onClick={onStartNewVote}
+                      disabled={submitting}
+                      type="button"
+                    >
+                      Start New Vote
+                    </button>
+                  </div>
                 )}
               </section>
             )}
