@@ -1,6 +1,7 @@
 "use client";
 
 import { useEffect, useMemo, useState } from "react";
+import { signIn, signOut, useSession } from "next-auth/react";
 
 /* ─── Types ─── */
 
@@ -140,10 +141,11 @@ function voteDurationLabel(hours: number): string {
 /* ─── Main Component ─── */
 
 export default function Home() {
+  const { data: session, status: sessionStatus } = useSession();
+  const selectedUserId = session?.user?.id ?? "";
+
   const [tab, setTab] = useState<"vote" | "reading" | "history" | "squad">("vote");
-  const [boot, setBoot] = useState<BootstrapPayload | null>(null);
   const [groupId, setGroupId] = useState("");
-  const [selectedUserId, setSelectedUserId] = useState("");
   const [snapshot, setSnapshot] = useState<Snapshot | null>(null);
   const [comments, setComments] = useState<Comment[]>([]);
   const [notifications, setNotifications] = useState<NotificationItem[]>([]);
@@ -183,22 +185,12 @@ export default function Home() {
   const [previewTexts, setPreviewTexts] = useState<Record<string, BibleText | null>>({});
   const [previewLoading, setPreviewLoading] = useState<Record<string, boolean>>({});
 
-  // Auth
-  const [authMode, setAuthMode] = useState<"login" | "register">("login");
-  const [authEmail, setAuthEmail] = useState("");
-  const [authName, setAuthName] = useState("");
-  const [authError, setAuthError] = useState("");
-  const [isAuthenticated, setIsAuthenticated] = useState(false);
-
   // Settings
   const [showSettings, setShowSettings] = useState(false);
 
   /* ─── Derived ─── */
 
-  const selectedUser = useMemo(
-    () => boot?.users.find((u) => u.id === selectedUserId) ?? null,
-    [boot?.users, selectedUserId],
-  );
+  const selectedUser = session?.user ?? null;
 
   const daysLeft = useMemo(() => {
     if (!snapshot) return 0;
@@ -251,15 +243,15 @@ export default function Home() {
     if (isOpen) loadProposalPreview(proposalId, reference);
   }
 
-  async function loadSnapshot(gId: string, uId: string) {
-    const payload = await api<Snapshot>(`/api/groups/${gId}/active-week?userId=${encodeURIComponent(uId)}`);
+  async function loadSnapshot(gId: string) {
+    const payload = await api<Snapshot>(`/api/groups/${gId}/active-week`);
     setSnapshot(payload);
     setInviteToken(payload.group.inviteToken ?? "");
 
     if (payload.readingItem) {
       const [c] = await Promise.all([
         api<{ comments: Comment[] }>(
-          `/api/reading-items/${payload.readingItem.id}/comments?userId=${encodeURIComponent(uId)}`,
+          `/api/reading-items/${payload.readingItem.id}/comments`,
         ),
         loadBibleText(payload.readingItem.reference),
       ]);
@@ -269,22 +261,22 @@ export default function Home() {
       setBibleText(null);
     }
 
-    const n = await api<{ notifications: NotificationItem[] }>(`/api/users/${uId}/notifications`);
+    const n = await api<{ notifications: NotificationItem[] }>(`/api/users/me/notifications`);
     setNotifications(n.notifications);
   }
 
-  async function loadUserGroups(userId: string): Promise<UserGroup[]> {
-    const payload = await api<{ groups: UserGroup[] }>(`/api/users/${userId}/groups`);
+  async function loadUserGroups(): Promise<UserGroup[]> {
+    const payload = await api<{ groups: UserGroup[] }>(`/api/users/me/groups`);
     setUserGroups(payload.groups);
     return payload.groups;
   }
 
-  async function refreshData(group = groupId, user = selectedUserId) {
-    if (!group || !user) return;
+  async function refreshData(group = groupId) {
+    if (!group) return;
     try {
       setError("");
       setMembershipError("");
-      await loadSnapshot(group, user);
+      await loadSnapshot(group);
     } catch (err) {
       const message = err instanceof Error ? err.message : "Failed to refresh";
       if (message.toLowerCase().includes("not a member")) {
@@ -299,36 +291,28 @@ export default function Home() {
   /* ─── Bootstrap ─── */
 
   useEffect(() => {
-    const savedUserId = window.localStorage.getItem("bible-app-user-id");
-    const savedUserName = window.localStorage.getItem("bible-app-user-name");
+    if (sessionStatus !== "authenticated" || !session?.user?.id) return;
 
-    if (savedUserId && savedUserName) {
-      setSelectedUserId(savedUserId);
-      setIsAuthenticated(true);
-      void (async () => {
-        try {
-          const payload = await api<BootstrapPayload>("/api/bootstrap");
-          setBoot(payload);
+    void (async () => {
+      try {
+        await api<BootstrapPayload>("/api/bootstrap");
 
-          const groups = await loadUserGroups(savedUserId);
-          const savedGroupId = window.localStorage.getItem("bible-app-group-id") ?? "";
-          const initialGroupId = groups.some((g) => g.id === savedGroupId) ? savedGroupId : groups[0]?.id ?? "";
-          setGroupId(initialGroupId);
-          if (initialGroupId) {
-            window.localStorage.setItem("bible-app-group-id", initialGroupId);
-            await loadSnapshot(initialGroupId, savedUserId);
-          }
-        } catch (err) {
-          setError(err instanceof Error ? err.message : "Failed to load app");
-        } finally {
-          setLoading(false);
+        const groups = await loadUserGroups();
+        const savedGroupId = window.localStorage.getItem("bible-app-group-id") ?? "";
+        const initialGroupId = groups.some((g) => g.id === savedGroupId) ? savedGroupId : groups[0]?.id ?? "";
+        setGroupId(initialGroupId);
+        if (initialGroupId) {
+          window.localStorage.setItem("bible-app-group-id", initialGroupId);
+          await loadSnapshot(initialGroupId);
         }
-      })();
-    } else {
-      setLoading(false);
-    }
+      } catch (err) {
+        setError(err instanceof Error ? err.message : "Failed to load app");
+      } finally {
+        setLoading(false);
+      }
+    })();
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, []);
+  }, [sessionStatus, session?.user?.id]);
 
   // Draft persistence
   useEffect(() => {
@@ -347,73 +331,9 @@ export default function Home() {
 
   /* ─── Auth ─── */
 
-  async function onLogin() {
-    setAuthError("");
-    if (!authEmail.trim()) {
-      setAuthError("Please enter your email.");
-      return;
-    }
-
-    try {
-      setSubmitting(true);
-      const payload = await api<{ user: User; isNew: boolean }>("/api/auth/login", {
-        method: "POST",
-        body: JSON.stringify({
-          email: authEmail.trim().toLowerCase(),
-          name: authName.trim() || undefined,
-        }),
-      });
-
-      if (!payload.user) {
-        setAuthError("Account not found. Please enter your name to sign up.");
-        setAuthMode("register");
-        return;
-      }
-
-      setSelectedUserId(payload.user.id);
-      window.localStorage.setItem("bible-app-user-id", payload.user.id);
-      window.localStorage.setItem("bible-app-user-name", payload.user.name);
-      setIsAuthenticated(true);
-
-      // Load the rest of the app
-      const bootPayload = await api<BootstrapPayload>("/api/bootstrap");
-      setBoot(bootPayload);
-
-      const groups = await loadUserGroups(payload.user.id);
-      const savedGroupId = window.localStorage.getItem("bible-app-group-id") ?? "";
-      const initialGroupId = groups.some((g) => g.id === savedGroupId) ? savedGroupId : groups[0]?.id ?? "";
-      setGroupId(initialGroupId);
-      if (initialGroupId) {
-        window.localStorage.setItem("bible-app-group-id", initialGroupId);
-        await loadSnapshot(initialGroupId, payload.user.id);
-      }
-    } catch (err) {
-      const msg = err instanceof Error ? err.message : "Login failed";
-      if (msg.includes("Name is required")) {
-        setAuthMode("register");
-        setAuthError("No account found. Enter your name to create one.");
-      } else {
-        setAuthError(msg);
-      }
-    } finally {
-      setSubmitting(false);
-    }
-  }
-
   function onSignOut() {
-    window.localStorage.removeItem("bible-app-user-id");
-    window.localStorage.removeItem("bible-app-user-name");
     window.localStorage.removeItem("bible-app-group-id");
-    setSelectedUserId("");
-    setIsAuthenticated(false);
-    setSnapshot(null);
-    setBoot(null);
-    setUserGroups([]);
-    setGroupId("");
-    setAuthEmail("");
-    setAuthName("");
-    setAuthMode("login");
-    setDrawerOpen(false);
+    void signOut();
   }
 
   /* ─── Actions ─── */
@@ -434,7 +354,7 @@ export default function Home() {
   function onChangeGroup(newGId: string) {
     setGroupId(newGId);
     window.localStorage.setItem("bible-app-group-id", newGId);
-    void refreshData(newGId, selectedUserId);
+    void refreshData(newGId);
   }
 
   function onVote(proposalId: string) {
@@ -465,7 +385,7 @@ export default function Home() {
         setSubmitting(true);
         const result = await api<{ ok: boolean; autoResolved?: boolean }>(`/api/groups/${groupId}/vote`, {
           method: "POST",
-          body: JSON.stringify({ userId: selectedUserId, proposalId }),
+          body: JSON.stringify({ proposalId }),
         });
         if (result.autoResolved) {
           setTab("reading");
@@ -485,7 +405,7 @@ export default function Home() {
     void mutate(async () => {
       await api(`/api/groups/${groupId}/proposals`, {
         method: "POST",
-        body: JSON.stringify({ userId: selectedUserId, reference: newReference, note: newNote }),
+        body: JSON.stringify({ reference: newReference, note: newNote }),
       });
       setNewReference("");
       setNewNote("");
@@ -498,7 +418,7 @@ export default function Home() {
     void mutate(async () => {
       await api(`/api/groups/${groupId}/resolve`, {
         method: "POST",
-        body: JSON.stringify({ userId: selectedUserId, proposalId }),
+        body: JSON.stringify({ proposalId }),
       });
     });
   }
@@ -508,7 +428,7 @@ export default function Home() {
     void mutate(async () => {
       await api(`/api/reading-items/${snapshot!.readingItem!.id}/read-mark`, {
         method: "POST",
-        body: JSON.stringify({ userId: selectedUserId, status }),
+        body: JSON.stringify({ status }),
       });
     });
   }
@@ -520,7 +440,7 @@ export default function Home() {
     void mutate(async () => {
       await api(`/api/reading-items/${snapshot.readingItem?.id}/comments`, {
         method: "POST",
-        body: JSON.stringify({ userId: selectedUserId, text, parentId }),
+        body: JSON.stringify({ text, parentId }),
       });
       if (parentId) {
         setReplyDrafts((prev) => ({ ...prev, [parentId]: "" }));
@@ -536,7 +456,7 @@ export default function Home() {
     void mutate(async () => {
       await api(`/api/comments/${commentId}`, {
         method: "DELETE",
-        body: JSON.stringify({ userId: selectedUserId }),
+        body: JSON.stringify({}),
       });
     });
   }
@@ -549,13 +469,13 @@ export default function Home() {
         setError("");
         const payload = await api<{ groupId: string }>(`/api/invites/${encodeURIComponent(joinToken.trim())}/join`, {
           method: "POST",
-          body: JSON.stringify({ userId: selectedUserId }),
+          body: JSON.stringify({}),
         });
         setGroupId(payload.groupId);
         window.localStorage.setItem("bible-app-group-id", payload.groupId);
         setMembershipError("");
-        await loadUserGroups(selectedUserId);
-        await loadSnapshot(payload.groupId, selectedUserId);
+        await loadUserGroups();
+        await loadSnapshot(payload.groupId);
         setDrawerOpen(false);
       } catch (err) {
         setError(err instanceof Error ? err.message : "Failed to join group");
@@ -575,7 +495,6 @@ export default function Home() {
           method: "POST",
           body: JSON.stringify({
             name: newGroupName.trim(),
-            ownerId: selectedUserId,
             timezone: Intl.DateTimeFormat().resolvedOptions().timeZone,
           }),
         });
@@ -583,8 +502,8 @@ export default function Home() {
         setShowCreateGroup(false);
         setGroupId(payload.groupId);
         window.localStorage.setItem("bible-app-group-id", payload.groupId);
-        await loadUserGroups(selectedUserId);
-        await loadSnapshot(payload.groupId, selectedUserId);
+        await loadUserGroups();
+        await loadSnapshot(payload.groupId);
         setDrawerOpen(false);
       } catch (err) {
         setError(err instanceof Error ? err.message : "Failed to create group");
@@ -599,7 +518,7 @@ export default function Home() {
     void mutate(async () => {
       const payload = await api<{ token: string }>(`/api/groups/${groupId}/invites`, {
         method: "POST",
-        body: JSON.stringify({ userId: selectedUserId }),
+        body: JSON.stringify({}),
       });
       setInviteToken(payload.token);
     });
@@ -610,7 +529,7 @@ export default function Home() {
     void mutate(async () => {
       await api(`/api/groups/${groupId}/proposals/reroll`, {
         method: "POST",
-        body: JSON.stringify({ userId: selectedUserId, proposalId }),
+        body: JSON.stringify({ proposalId }),
       });
     });
   }
@@ -620,7 +539,7 @@ export default function Home() {
     void mutate(async () => {
       await api(`/api/groups/${groupId}/new-vote`, {
         method: "POST",
-        body: JSON.stringify({ userId: selectedUserId }),
+        body: JSON.stringify({}),
       });
       setTab("vote");
     });
@@ -631,14 +550,14 @@ export default function Home() {
     void mutate(async () => {
       await api(`/api/groups/${groupId}/settings`, {
         method: "PUT",
-        body: JSON.stringify({ userId: selectedUserId, [field]: value }),
+        body: JSON.stringify({ [field]: value }),
       });
     });
   }
 
   /* ─── Loading screen ─── */
 
-  if (loading) {
+  if (loading || sessionStatus === "loading") {
     return (
       <div className="loading-screen">
         <span>Bible Vote</span>
@@ -648,57 +567,20 @@ export default function Home() {
 
   /* ─── Auth screen ─── */
 
-  if (!isAuthenticated) {
+  if (!session) {
     return (
       <div className="auth-screen">
         <div className="auth-card">
           <div className="auth-brand">Bible Vote</div>
           <div className="auth-subtitle">Vote on weekly Bible readings with your group</div>
-
-          <div className="stack" style={{ marginTop: 24 }}>
-            <input
-              className="auth-input"
-              type="email"
-              value={authEmail}
-              onChange={(e) => setAuthEmail(e.target.value)}
-              onKeyDown={(e) => e.key === "Enter" && !submitting && onLogin()}
-              placeholder="Email address"
-              autoFocus
-            />
-
-            {authMode === "register" && (
-              <input
-                className="auth-input"
-                type="text"
-                value={authName}
-                onChange={(e) => setAuthName(e.target.value)}
-                onKeyDown={(e) => e.key === "Enter" && !submitting && onLogin()}
-                placeholder="Your name"
-              />
-            )}
-
-            {authError && <div className="auth-error">{authError}</div>}
-
-            <button
-              className="btn btn-gold auth-btn"
-              onClick={onLogin}
-              disabled={submitting || !authEmail.trim() || (authMode === "register" && !authName.trim())}
-              type="button"
-            >
-              {submitting ? "..." : authMode === "register" ? "Create Account" : "Sign In"}
-            </button>
-
-            <button
-              className="btn-link auth-toggle"
-              onClick={() => {
-                setAuthMode((m) => (m === "login" ? "register" : "login"));
-                setAuthError("");
-              }}
-              type="button"
-            >
-              {authMode === "login" ? "New here? Create an account" : "Already have an account? Sign in"}
-            </button>
-          </div>
+          <button
+            className="btn btn-gold auth-btn"
+            onClick={() => void signIn("google")}
+            style={{ marginTop: 24 }}
+            type="button"
+          >
+            Sign in with Google
+          </button>
         </div>
       </div>
     );
@@ -746,8 +628,8 @@ export default function Home() {
               {getAvatar(selectedUser?.name ?? "?")}
             </span>
             <div>
-              <div style={{ fontWeight: 500 }}>{selectedUser?.name ?? window.localStorage.getItem("bible-app-user-name")}</div>
-              <div className="text-tertiary" style={{ fontSize: 12 }}>{selectedUser?.email ?? ""}</div>
+              <div style={{ fontWeight: 500 }}>{session?.user?.name ?? "Unknown"}</div>
+              <div className="text-tertiary" style={{ fontSize: 12 }}>{session?.user?.email ?? ""}</div>
             </div>
           </div>
           <button
@@ -1037,7 +919,7 @@ export default function Home() {
                             onClick={() => void mutate(async () => {
                               await api(`/api/groups/${groupId}/proposals`, {
                                 method: "DELETE",
-                                body: JSON.stringify({ userId: selectedUserId, proposalId: p.id }),
+                                body: JSON.stringify({ proposalId: p.id }),
                               });
                             })}
                             disabled={submitting}
@@ -1416,7 +1298,7 @@ export default function Home() {
         )}
 
         <div className="text-tertiary" style={{ fontSize: 11, textAlign: "center", paddingTop: 8 }}>
-          Signed in as {selectedUser?.name ?? window.localStorage.getItem("bible-app-user-name") ?? "Unknown"}
+          Signed in as {session?.user?.name ?? "Unknown"}
         </div>
       </main>
     </>
