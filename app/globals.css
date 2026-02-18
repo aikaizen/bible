@@ -1055,6 +1055,83 @@ button, input, textarea, select {
   color: var(--text);
 }
 
+/* ─── Reader navigation ─── */
+
+.reader-back-btn {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  color: var(--gold);
+  border: 1px solid var(--gold-border);
+  background: var(--gold-dim);
+  font-size: 12px;
+  width: 100%;
+  justify-content: flex-start;
+}
+
+.chapter-nav {
+  display: flex;
+  gap: 8px;
+  justify-content: space-between;
+  margin-top: 4px;
+  padding-top: 12px;
+  border-top: 1px solid var(--border);
+}
+
+.chapter-nav-btn {
+  flex: 1;
+  font-size: 12px;
+  color: var(--text-secondary);
+}
+
+.chapter-nav-btn:disabled {
+  opacity: 0;
+  pointer-events: none;
+}
+
+/* ─── Proposal "Read It" button ─── */
+
+.read-it-btn {
+  align-self: flex-start;
+  color: var(--gold);
+  border: 1px solid var(--gold-border);
+  font-size: 12px;
+  padding: 4px 12px;
+}
+
+/* ─── Book autocomplete ─── */
+
+.reference-input-wrap {
+  position: relative;
+}
+
+.autocomplete-dropdown {
+  position: absolute;
+  top: calc(100% + 4px);
+  left: 0;
+  right: 0;
+  background: var(--bg-raised);
+  border: 1px solid var(--border-strong);
+  border-radius: var(--radius-sm);
+  overflow: hidden;
+  z-index: 50;
+}
+
+.autocomplete-item {
+  display: block;
+  width: 100%;
+  text-align: left;
+  padding: 8px 12px;
+  font-size: 13px;
+  color: var(--text);
+  cursor: pointer;
+  transition: background 0.1s;
+}
+
+.autocomplete-item:hover {
+  background: var(--bg-surface-hover);
+}
+
 /* ─── Scrollbar ─── */
 
 ::-webkit-scrollbar { width: 6px; }

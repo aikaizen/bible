@@ -1,7 +1,70 @@
 "use client";
 
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { signIn, signOut, useSession } from "next-auth/react";
+import { isValidReference } from "@/lib/reference";
+
+/* ─── Bible data ─── */
+
+const BIBLE_BOOKS = [
+  "Genesis","Exodus","Leviticus","Numbers","Deuteronomy",
+  "Joshua","Judges","Ruth","1 Samuel","2 Samuel",
+  "1 Kings","2 Kings","1 Chronicles","2 Chronicles",
+  "Ezra","Nehemiah","Esther","Job","Psalms","Proverbs",
+  "Ecclesiastes","Song of Solomon","Isaiah","Jeremiah",
+  "Lamentations","Ezekiel","Daniel","Hosea","Joel","Amos",
+  "Obadiah","Jonah","Micah","Nahum","Habakkuk","Zephaniah",
+  "Haggai","Zechariah","Malachi",
+  "Matthew","Mark","Luke","John","Acts","Romans",
+  "1 Corinthians","2 Corinthians","Galatians","Ephesians",
+  "Philippians","Colossians","1 Thessalonians","2 Thessalonians",
+  "1 Timothy","2 Timothy","Titus","Philemon","Hebrews",
+  "James","1 Peter","2 Peter","1 John","2 John","3 John",
+  "Jude","Revelation",
+];
+
+const BIBLE_CHAPTERS: Record<string, number> = {
+  Genesis:50,Exodus:40,Leviticus:27,Numbers:36,Deuteronomy:34,
+  Joshua:24,Judges:21,Ruth:4,"1 Samuel":31,"2 Samuel":24,
+  "1 Kings":22,"2 Kings":25,"1 Chronicles":29,"2 Chronicles":36,
+  Ezra:10,Nehemiah:13,Esther:10,Job:42,Psalms:150,Proverbs:31,
+  Ecclesiastes:12,"Song of Solomon":8,Isaiah:66,Jeremiah:52,
+  Lamentations:5,Ezekiel:48,Daniel:12,Hosea:14,Joel:3,Amos:9,
+  Obadiah:1,Jonah:4,Micah:7,Nahum:3,Habakkuk:3,Zephaniah:3,
+  Haggai:2,Zechariah:14,Malachi:4,
+  Matthew:28,Mark:16,Luke:24,John:21,Acts:28,Romans:16,
+  "1 Corinthians":16,"2 Corinthians":13,Galatians:6,Ephesians:6,
+  Philippians:4,Colossians:4,"1 Thessalonians":5,"2 Thessalonians":3,
+  "1 Timothy":6,"2 Timothy":4,Titus:3,Philemon:1,Hebrews:13,
+  James:5,"1 Peter":5,"2 Peter":3,"1 John":5,"2 John":1,"3 John":1,
+  Jude:1,Revelation:22,
+};
+
+function parseRefParts(ref: string): { book: string; chapter: number } | null {
+  const m = ref.trim().match(/^((?:[1-3]\s+)?[A-Za-z][A-Za-z\s]*?)\s+(\d+)/);
+  if (!m) return null;
+  return { book: m[1].trim(), chapter: parseInt(m[2], 10) };
+}
+
+function navigateChapter(ref: string, delta: number): string | null {
+  const parts = parseRefParts(ref);
+  if (!parts) return null;
+  const bookKey = Object.keys(BIBLE_CHAPTERS).find(
+    (k) => k.toLowerCase() === parts.book.toLowerCase(),
+  );
+  if (!bookKey) return null;
+  const next = parts.chapter + delta;
+  if (next < 1 || next > BIBLE_CHAPTERS[bookKey]) return null;
+  return `${bookKey} ${next}`;
+}
+
+function getBookSuggestions(input: string): string[] {
+  const bookPart = input.replace(/\d.*/, "").trim();
+  if (bookPart.length < 2) return [];
+  return BIBLE_BOOKS.filter((b) =>
+    b.toLowerCase().startsWith(bookPart.toLowerCase()),
+  ).slice(0, 5);
+}
 
 /* ─── Types ─── */
 
@@ -183,6 +246,11 @@ export default function Home() {
   // Bible text
   const [bibleText, setBibleText] = useState<BibleText | null>(null);
   const [bibleLoading, setBibleLoading] = useState(false);
+  // Reader navigation
+  const [readerReference, setReaderReference] = useState<string | null>(null);
+  // Autocomplete
+  const [bookSuggestions, setBookSuggestions] = useState<string[]>([]);
+  const autocompleteRef = useRef<HTMLDivElement>(null);
 
   // Proposal previews (#13)
   const [previewOpen, setPreviewOpen] = useState<Record<string, boolean>>({});
@@ -232,6 +300,24 @@ export default function Home() {
     } finally {
       setBibleLoading(false);
     }
+  }
+
+  function openInReader(reference: string) {
+    setReaderReference(reference);
+    setTab("reading");
+    void loadBibleText(reference);
+  }
+
+  function goToWeekReading() {
+    setReaderReference(null);
+    if (snapshot?.readingItem) void loadBibleText(snapshot.readingItem.reference);
+  }
+
+  function navigateReader(delta: number) {
+    const current = readerReference ?? snapshot?.readingItem?.reference;
+    if (!current) return;
+    const next = navigateChapter(current, delta);
+    if (next) openInReader(next);
   }
 
   async function loadProposalPreview(proposalId: string, reference: string) {
@@ -1052,12 +1138,46 @@ export default function Home() {
                             Format: <strong>Book Chapter:Start-End</strong> (e.g. John 3:1-21, Psalm 23, Romans 8:18-39)
                           </div>
                         </div>
-                        <input
-                          className="input"
-                          value={newReference}
-                          onChange={(e) => setNewReference(e.target.value)}
-                          placeholder="Reference (e.g. John 3:1-21)"
-                        />
+                        <div className="reference-input-wrap" ref={autocompleteRef}>
+                          <input
+                            className="input"
+                            value={newReference}
+                            onChange={(e) => {
+                              const val = e.target.value;
+                              setNewReference(val);
+                              setBookSuggestions(getBookSuggestions(val));
+                            }}
+                            onBlur={() => setTimeout(() => setBookSuggestions([]), 150)}
+                            placeholder="Reference (e.g. John 3:1-21)"
+                          />
+                          {bookSuggestions.length > 0 && (
+                            <div className="autocomplete-dropdown">
+                              {bookSuggestions.map((b) => (
+                                <button
+                                  key={b}
+                                  type="button"
+                                  className="autocomplete-item"
+                                  onMouseDown={() => {
+                                    const rest = newReference.replace(/^[^0-9]*/, "");
+                                    setNewReference(rest ? `${b} ${rest}` : `${b} `);
+                                    setBookSuggestions([]);
+                                  }}
+                                >
+                                  {b}
+                                </button>
+                              ))}
+                            </div>
+                          )}
+                        </div>
+                        {isValidReference(newReference) && (
+                          <button
+                            type="button"
+                            className="btn btn-sm read-it-btn"
+                            onClick={() => openInReader(newReference)}
+                          >
+                            Read it
+                          </button>
+                        )}
                         <textarea
                           className="textarea"
                           value={newNote}
@@ -1107,23 +1227,40 @@ export default function Home() {
             {/* ── READING TAB ── */}
             {tab === "reading" && (
               <section className="stack fade-in">
-                {!snapshot.readingItem ? (
+                {!snapshot.readingItem && !readerReference ? (
                   <div className="empty">
                     <svg className="empty-icon" viewBox="0 0 24 24"><path d="M2 3h6a4 4 0 014 4v14a3 3 0 00-3-3H2z" /><path d="M22 3h-6a4 4 0 00-4 4v14a3 3 0 013-3h7z" /></svg>
                     Waiting for the vote to resolve. Discussion opens once a passage is selected.
                   </div>
                 ) : (
                   <>
+                    {/* Back to week's reading */}
+                    {readerReference && snapshot.readingItem && readerReference !== snapshot.readingItem.reference && (
+                      <button
+                        type="button"
+                        className="btn btn-sm reader-back-btn"
+                        onClick={goToWeekReading}
+                      >
+                        ← Back to this week&apos;s reading ({snapshot.readingItem.reference})
+                      </button>
+                    )}
+
                     {/* Reading card */}
                     <div className="card stack">
-                      <div className="text-tertiary" style={{ fontSize: 10, letterSpacing: 1.2, textTransform: "uppercase", fontWeight: 600 }}>
-                        Week of {toDateLabel(snapshot.week.startDate)}
-                      </div>
-                      <div className="section-title">{snapshot.readingItem.reference}</div>
-                      {snapshot.readingItem.note && <div className="text-muted">{snapshot.readingItem.note}</div>}
-                      {snapshot.readingItem.proposerName && (
-                        <div className="text-tertiary" style={{ fontSize: 12 }}>Proposed by {snapshot.readingItem.proposerName}</div>
+                      {!readerReference && snapshot.readingItem && (
+                        <>
+                          <div className="text-tertiary" style={{ fontSize: 10, letterSpacing: 1.2, textTransform: "uppercase", fontWeight: 600 }}>
+                            Week of {toDateLabel(snapshot.week.startDate)}
+                          </div>
+                          {snapshot.readingItem.note && <div className="text-muted">{snapshot.readingItem.note}</div>}
+                          {snapshot.readingItem.proposerName && (
+                            <div className="text-tertiary" style={{ fontSize: 12 }}>Proposed by {snapshot.readingItem.proposerName}</div>
+                          )}
+                        </>
                       )}
+                      <div className="section-title">
+                        {readerReference ?? snapshot.readingItem?.reference}
+                      </div>
 
                       {/* Bible Text */}
                       {bibleLoading && (
@@ -1145,54 +1282,85 @@ export default function Home() {
                       {!bibleLoading && bibleText === null && (
                         <button
                           className="btn btn-sm"
-                          onClick={() => loadBibleText(snapshot.readingItem!.reference)}
+                          onClick={() => loadBibleText(readerReference ?? snapshot.readingItem!.reference)}
                           type="button"
                         >
                           Load passage text
                         </button>
                       )}
 
-                      {/* Read status pills */}
-                      <div className="read-pills">
-                        <button
-                          className={`read-pill ${myReadStatus === "NOT_MARKED" ? "active" : ""}`}
-                          onClick={() => onReadMark("NOT_MARKED")}
-                          type="button"
-                        >
-                          Not Read
-                        </button>
-                        <button
-                          className={`read-pill ${myReadStatus === "PLANNED" ? "active" : ""}`}
-                          onClick={() => onReadMark("PLANNED")}
-                          type="button"
-                        >
-                          Planned
-                        </button>
-                        <button
-                          className={`read-pill ${myReadStatus === "READ" ? "active-ok" : ""}`}
-                          onClick={() => onReadMark("READ")}
-                          type="button"
-                        >
-                          Read
-                        </button>
-                      </div>
+                      {/* Chapter navigation */}
+                      {(() => {
+                        const cur = readerReference ?? snapshot.readingItem?.reference ?? "";
+                        const prevRef = navigateChapter(cur, -1);
+                        const nextRef = navigateChapter(cur, 1);
+                        if (!prevRef && !nextRef) return null;
+                        return (
+                          <div className="chapter-nav">
+                            <button
+                              type="button"
+                              className="btn btn-sm chapter-nav-btn"
+                              onClick={() => navigateReader(-1)}
+                              disabled={!prevRef}
+                            >
+                              ← {prevRef ?? ""}
+                            </button>
+                            <button
+                              type="button"
+                              className="btn btn-sm chapter-nav-btn"
+                              onClick={() => navigateReader(1)}
+                              disabled={!nextRef}
+                            >
+                              {nextRef ?? ""} →
+                            </button>
+                          </div>
+                        );
+                      })()}
 
-                      {/* Member read statuses */}
-                      <div>
-                        {snapshot.members.map((m) => {
-                          const st = snapshot.readMarks.find((rm) => rm.userId === m.id)?.status ?? "NOT_MARKED";
-                          return (
-                            <div key={m.id} className="member-status">
-                              <span className="avatar avatar-sm" style={{ background: colorFor(m.id) }}>{getAvatar(m.name)}</span>
-                              <span className="member-status-name">{m.name}</span>
-                              <span className={`status-dot ${st === "READ" ? "read" : st === "PLANNED" ? "planned" : ""}`} />
-                              <span className="text-tertiary" style={{ fontSize: 11, minWidth: 50, textAlign: "right" }}>
-                                {st === "NOT_MARKED" ? "none" : st.toLowerCase()}
-                              </span>
-                            </div>
-                          );
-                        })}
-                      </div>
+                      {/* Read status + member statuses — only for week's assigned reading */}
+                      {!readerReference && snapshot.readingItem && (
+                        <>
+                          <div className="read-pills">
+                            <button
+                              className={`read-pill ${myReadStatus === "NOT_MARKED" ? "active" : ""}`}
+                              onClick={() => onReadMark("NOT_MARKED")}
+                              type="button"
+                            >
+                              Not Read
+                            </button>
+                            <button
+                              className={`read-pill ${myReadStatus === "PLANNED" ? "active" : ""}`}
+                              onClick={() => onReadMark("PLANNED")}
+                              type="button"
+                            >
+                              Planned
+                            </button>
+                            <button
+                              className={`read-pill ${myReadStatus === "READ" ? "active-ok" : ""}`}
+                              onClick={() => onReadMark("READ")}
+                              type="button"
+                            >
+                              Read
+                            </button>
+                          </div>
+
+                          <div>
+                            {snapshot.members.map((m) => {
+                              const st = snapshot.readMarks.find((rm) => rm.userId === m.id)?.status ?? "NOT_MARKED";
+                              return (
+                                <div key={m.id} className="member-status">
+                                  <span className="avatar avatar-sm" style={{ background: colorFor(m.id) }}>{getAvatar(m.name)}</span>
+                                  <span className="member-status-name">{m.name}</span>
+                                  <span className={`status-dot ${st === "READ" ? "read" : st === "PLANNED" ? "planned" : ""}`} />
+                                  <span className="text-tertiary" style={{ fontSize: 11, minWidth: 50, textAlign: "right" }}>
+                                    {st === "NOT_MARKED" ? "none" : st.toLowerCase()}
+                                  </span>
+                                </div>
+                              );
+                            })}
+                          </div>
+                        </>
+                      )}
                     </div>
 
                     {/* Discussion */}
