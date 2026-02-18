@@ -1,4 +1,7 @@
+import crypto from "node:crypto";
+
 import NextAuth from "next-auth";
+import Credentials from "next-auth/providers/credentials";
 import Google from "next-auth/providers/google";
 
 import { dbQueryOne } from "./db";
@@ -23,11 +26,64 @@ declare module "@auth/core/jwt" {
   }
 }
 
+function verifyAdminPassword(input: string): boolean {
+  const expected = process.env.ADMIN_PASSWORD_HASH;
+  if (!expected) return false;
+  const inputHash = crypto.createHash("sha256").update(input).digest("hex");
+  try {
+    return crypto.timingSafeEqual(
+      Buffer.from(inputHash, "hex"),
+      Buffer.from(expected, "hex"),
+    );
+  } catch {
+    return false;
+  }
+}
+
+async function upsertUserByEmail(email: string, name: string): Promise<string | null> {
+  const existing = await dbQueryOne<{ id: string }>(
+    `SELECT id FROM users WHERE email = $1`,
+    [email.toLowerCase()],
+  );
+  if (existing) return existing.id;
+
+  const created = await dbQueryOne<{ id: string }>(
+    `INSERT INTO users(name, email, default_language)
+     VALUES ($1, $2, 'en')
+     RETURNING id`,
+    [name.slice(0, 60), email.toLowerCase()],
+  );
+  return created?.id ?? null;
+}
+
 export const { handlers, auth, signIn, signOut } = NextAuth({
-  providers: [Google],
+  providers: [
+    Google,
+    Credentials({
+      id: "admin",
+      name: "Admin",
+      credentials: {
+        email: { label: "Email", type: "email" },
+        password: { label: "Password", type: "password" },
+      },
+      async authorize(credentials) {
+        const email = typeof credentials?.email === "string" ? credentials.email.trim() : "";
+        const password = typeof credentials?.password === "string" ? credentials.password : "";
+        if (!email || !password) return null;
+        if (!verifyAdminPassword(password)) return null;
+
+        const dbId = await upsertUserByEmail(email, email.split("@")[0]);
+        if (!dbId) return null;
+        return { id: dbId, dbId, email, name: email.split("@")[0] };
+      },
+    }),
+  ],
   session: { strategy: "jwt" },
   callbacks: {
     async signIn({ user, account }) {
+      // Credentials provider already handled auth in authorize()
+      if (account?.provider === "admin") return true;
+
       if (account?.provider !== "google" || !user.email) return false;
 
       const googleId = account.providerAccountId;

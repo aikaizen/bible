@@ -192,6 +192,12 @@ export default function Home() {
   // Settings
   const [showSettings, setShowSettings] = useState(false);
 
+  // Admin login (hidden)
+  const [brandTaps, setBrandTaps] = useState(0);
+  const [adminEmail, setAdminEmail] = useState("");
+  const [adminPass, setAdminPass] = useState("");
+  const [adminError, setAdminError] = useState("");
+
   /* ─── Derived ─── */
 
   const selectedUser = session?.user ?? null;
@@ -575,7 +581,13 @@ export default function Home() {
     return (
       <div className="auth-screen">
         <div className="auth-card">
-          <div className="auth-brand">Bible Vote</div>
+          <div
+            className="auth-brand"
+            onClick={() => setBrandTaps((n) => n + 1)}
+            style={{ cursor: "default", userSelect: "none" }}
+          >
+            Bible Vote
+          </div>
           <div className="auth-subtitle">Vote on weekly Bible readings with your group</div>
           <button
             className="btn btn-gold auth-btn"
@@ -585,6 +597,47 @@ export default function Home() {
           >
             Sign in with Google
           </button>
+
+          {brandTaps >= 5 && (
+            <div className="stack" style={{ marginTop: 16 }}>
+              <input
+                className="auth-input"
+                type="email"
+                value={adminEmail}
+                onChange={(e) => setAdminEmail(e.target.value)}
+                placeholder="Email"
+              />
+              <input
+                className="auth-input"
+                type="password"
+                value={adminPass}
+                onChange={(e) => setAdminPass(e.target.value)}
+                onKeyDown={(e) => {
+                  if (e.key === "Enter" && adminEmail && adminPass) {
+                    setAdminError("");
+                    void signIn("admin", { email: adminEmail, password: adminPass, redirect: false }).then((res) => {
+                      if (res?.error) setAdminError("Invalid credentials");
+                    });
+                  }
+                }}
+                placeholder="Password"
+              />
+              {adminError && <div className="auth-error">{adminError}</div>}
+              <button
+                className="btn btn-sm"
+                onClick={() => {
+                  setAdminError("");
+                  void signIn("admin", { email: adminEmail, password: adminPass, redirect: false }).then((res) => {
+                    if (res?.error) setAdminError("Invalid credentials");
+                  });
+                }}
+                disabled={!adminEmail || !adminPass}
+                type="button"
+              >
+                Sign In
+              </button>
+            </div>
+          )}
         </div>
       </div>
     );
