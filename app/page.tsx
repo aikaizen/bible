@@ -557,7 +557,7 @@ export default function Home() {
 
   /* ─── Loading screen ─── */
 
-  if (loading || sessionStatus === "loading") {
+  if (sessionStatus === "loading" || (session && loading)) {
     return (
       <div className="loading-screen">
         <span>Bible Vote</span>
