@@ -125,6 +125,10 @@ async function api<T>(url: string, options?: RequestInit): Promise<T> {
     ...options,
     headers: { "Content-Type": "application/json", ...(options?.headers ?? {}) },
   });
+  if (response.status === 401) {
+    window.location.href = "/api/auth/signin";
+    throw new Error("Session expired");
+  }
   const payload = (await response.json()) as T & { error?: string };
   if (!response.ok) throw new Error(payload.error ?? "Request failed");
   return payload;
