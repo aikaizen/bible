@@ -23,6 +23,7 @@ This app stores references only (no scripture text content).
 4. Import the repo in Vercel.
 5. In Vercel project settings, add environment variable:
    - `DATABASE_URL=<your_supabase_connection_string>`
+   - `CRON_SECRET=<long_random_secret>`
 6. Deploy once.
 7. Run migration against Supabase:
 ```bash
@@ -32,6 +33,10 @@ DATABASE_URL=<your_supabase_connection_string> npm run db:migrate
 ```bash
 DATABASE_URL=<your_supabase_connection_string> npm run db:seed
 ```
+9. Add a Vercel Cron (hourly recommended) for weekly lifecycle automation:
+   - Path: `/api/cron/weekly-rollover`
+   - Schedule: `0 * * * *`
+   - Vercel automatically sends `Authorization: Bearer <CRON_SECRET>` when `CRON_SECRET` is set.
 
 ## Local Setup (Optional)
 1. Install dependencies
@@ -39,27 +44,25 @@ DATABASE_URL=<your_supabase_connection_string> npm run db:seed
 npm install
 ```
 
-2. Start PostgreSQL
-```bash
-docker compose up -d db
-```
-
-3. Configure environment
+2. Configure environment
 ```bash
 cp .env.example .env
 ```
+Use either:
+- Supabase Postgres URL in `DATABASE_URL`, or
+- Any local Postgres instance URL (Docker is optional, not required).
 
-4. Run schema migration
+3. Run schema migration
 ```bash
 npm run db:migrate
 ```
 
-5. Seed demo data
+4. Seed demo data
 ```bash
 npm run db:seed
 ```
 
-6. Start the app
+5. Start the app
 ```bash
 npm run dev
 ```
@@ -74,6 +77,7 @@ Open [http://localhost:3000](http://localhost:3000).
 - `DELETE /api/groups/:groupId/proposals`
 - `POST /api/groups/:groupId/vote`
 - `POST /api/groups/:groupId/resolve`
+- `GET/POST /api/cron/weekly-rollover`
 - `POST /api/groups/:groupId/invites`
 - `POST /api/invites/:token/join`
 - `GET/POST /api/reading-items/:readingItemId/comments`
@@ -89,9 +93,11 @@ Open [http://localhost:3000](http://localhost:3000).
 
 ## Product Notes vs PRD
 - Default vote close is Wednesday 8:00 PM in group timezone.
-- If no votes or no proposals, week stays `PENDING_MANUAL` for admin pick.
+- If proposals exist but no votes are cast, resolution falls back to a random proposal.
+- If there are no proposals, week stays `PENDING_MANUAL` for admin pick.
 - Mentions (`@NameNoSpaces`) and replies generate notifications.
 - Comment edit window is 5 minutes; delete is always allowed for author.
+- Reader zone is always synced to a shared group passage (created immediately for each active week).
 
 ## Important
 This is an MVP foundation. For production hardening, add:

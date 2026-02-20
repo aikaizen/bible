@@ -51,6 +51,20 @@ type ProposalVoteRow = {
   is_seed: boolean;
 };
 
+type WeekProposalRow = {
+  id: string;
+  reference: string;
+  created_at: string;
+};
+
+type ReadingItemRow = {
+  id: string;
+  proposal_id: string | null;
+  reference: string;
+};
+
+let randomSource: () => number = () => Math.random();
+
 function nowIso(): string {
   return new Date().toISOString();
 }
@@ -163,10 +177,127 @@ async function getCurrentWeekMeta(groupId: string): Promise<{ startDate: string;
   return { startDate: row.start_date, closeAt: row.close_at };
 }
 
+function pickRandom<T>(items: T[]): T | null {
+  if (items.length === 0) return null;
+  const raw = randomSource();
+  const normalized = Number.isFinite(raw) ? Math.min(0.999999, Math.max(0, raw)) : 0;
+  return items[Math.floor(normalized * items.length)] ?? null;
+}
+
+export function __setRandomSourceForTests(source: () => number): void {
+  randomSource = source;
+}
+
+export function __resetRandomSourceForTests(): void {
+  randomSource = () => Math.random();
+}
+
+async function getWeekProposals(
+  weekId: string,
+  client?: PoolClient,
+): Promise<WeekProposalRow[]> {
+  return dbQuery<WeekProposalRow>(
+    `SELECT id, reference, created_at::text
+     FROM proposals
+     WHERE week_id = $1
+       AND deleted_at IS NULL
+     ORDER BY created_at ASC`,
+    [weekId],
+    client,
+  );
+}
+
+async function pickRandomProposalForWeek(
+  weekId: string,
+  client?: PoolClient,
+): Promise<WeekProposalRow | null> {
+  const proposals = await getWeekProposals(weekId, client);
+  return pickRandom(proposals);
+}
+
+async function upsertWeekReadingFromProposal(
+  weekId: string,
+  proposal: Pick<WeekProposalRow, "id" | "reference">,
+  client?: PoolClient,
+): Promise<ReadingItemRow | null> {
+  return dbQueryOne<ReadingItemRow>(
+    `INSERT INTO reading_items(week_id, proposal_id, reference)
+     VALUES ($1, $2, $3)
+     ON CONFLICT (week_id)
+     DO UPDATE SET proposal_id = EXCLUDED.proposal_id, reference = EXCLUDED.reference
+     RETURNING id, proposal_id, reference`,
+    [weekId, proposal.id, proposal.reference],
+    client,
+  );
+}
+
+async function ensureWeekReadingItem(
+  weekId: string,
+  client?: PoolClient,
+): Promise<ReadingItemRow | null> {
+  const [proposals, existingReading] = await Promise.all([
+    getWeekProposals(weekId, client),
+    dbQueryOne<ReadingItemRow>(
+      `SELECT id, proposal_id, reference
+       FROM reading_items
+       WHERE week_id = $1`,
+      [weekId],
+      client,
+    ),
+  ]);
+
+  if (proposals.length === 0) return existingReading;
+
+  if (
+    existingReading?.proposal_id &&
+    proposals.some((proposal) => proposal.id === existingReading.proposal_id)
+  ) {
+    return existingReading;
+  }
+
+  const randomProposal = pickRandom(proposals);
+  if (!randomProposal) return existingReading;
+
+  return upsertWeekReadingFromProposal(weekId, randomProposal, client);
+}
+
+async function syncReadingToVoteLeader(weekId: string): Promise<void> {
+  const tallies = await dbQuery<{
+    id: string;
+    reference: string;
+    vote_count: string;
+    created_at: string;
+  }>(
+    `SELECT
+       p.id,
+       p.reference,
+       COUNT(v.id)::text AS vote_count,
+       p.created_at::text
+     FROM proposals p
+     LEFT JOIN votes v ON v.proposal_id = p.id
+     WHERE p.week_id = $1
+       AND p.deleted_at IS NULL
+     GROUP BY p.id, p.reference, p.created_at
+     ORDER BY COUNT(v.id) DESC, p.created_at ASC`,
+    [weekId],
+  );
+
+  if (tallies.length === 0) return;
+
+  const topVotes = Number(tallies[0].vote_count);
+  if (topVotes <= 0) return;
+
+  const tied = tallies.filter((row) => Number(row.vote_count) === topVotes);
+  if (tied.length !== 1) return;
+
+  await upsertWeekReadingFromProposal(weekId, tied[0]);
+}
+
 async function insertSeedProposals(
   groupId: string,
   weekId: string,
   ownerId: string,
+  count = 3,
 ): Promise<void> {
   // Get all references the group has already read or proposed
   const pastReferences = await dbQuery<{ reference: string }>(
@@ -178,7 +309,7 @@ async function insertSeedProposals(
   );
 
   const alreadyRead = pastReferences.map((r) => r.reference);
-  const seeds = pickSeedPassages(3, alreadyRead);
+  const seeds = pickSeedPassages(count, alreadyRead);
 
   for (const seed of seeds) {
     await dbQuery(
@@ -189,7 +320,7 @@ async function insertSeedProposals(
   }
 }
 
-const WEEK_SELECT = `SELECT id, group_id, start_date::text, voting_close_at::text, resolved_reading_id, status, reminder_sent_at::text FROM weeks`;
+const WEEK_SELECT = `SELECT id, group_id, start_date, voting_close_at::text, resolved_reading_id, status, reminder_sent_at::text FROM weeks`;
 
 async function getActiveWeek(groupId: string): Promise<WeekRow | null> {
   return dbQueryOne<WeekRow>(
@@ -219,6 +350,7 @@ async function ensureCurrentWeekExists(groupId: string): Promise<WeekRow> {
 
   if (inserted) {
     await insertSeedProposals(groupId, inserted.id, group.owner_id);
+    await ensureWeekReadingItem(inserted.id);
 
     await notifyGroupMembers(
       groupId,
@@ -291,7 +423,7 @@ async function calculateWinner(
      LEFT JOIN votes v ON v.proposal_id = p.id
      WHERE p.week_id = $1
        AND p.deleted_at IS NULL
-     GROUP BY p.id, u.name
+     GROUP BY p.id, p.reference, p.note, p.proposer_id, p.created_at, u.name
      ORDER BY COUNT(v.id) DESC, p.created_at ASC`,
     [weekId],
   );
@@ -302,7 +434,10 @@ async function calculateWinner(
 
   const topVotes = Number(proposals[0].vote_count);
   if (topVotes <= 0) {
-    return { proposalId: null, status: "PENDING_MANUAL", reason: "NO_VOTES" };
+    const randomProposal = pickRandom(proposals);
+    return randomProposal
+      ? { proposalId: randomProposal.id, status: "RESOLVED", reason: "NO_VOTES_RANDOM" }
+      : { proposalId: null, status: "PENDING_MANUAL", reason: "NO_VOTES" };
   }
 
   const tied = proposals.filter((proposal) => Number(proposal.vote_count) === topVotes);
@@ -315,7 +450,10 @@ async function calculateWinner(
   }
 
   if (tiePolicy === "RANDOM") {
-    const pick = tied[Math.floor(Math.random() * tied.length)];
+    const pick = pickRandom(tied);
+    if (!pick) {
+      return { proposalId: null, status: "PENDING_MANUAL", reason: "TIE_RANDOM_EMPTY" };
+    }
     return { proposalId: pick.id, status: "RESOLVED", reason: "TIE_RANDOM" };
   }
 
@@ -329,7 +467,7 @@ async function finalizeWeek(
 ): Promise<{ weekStatus: WeekStatus; readingItemId: string | null; reference: string | null }> {
   return withTransaction(async (client) => {
     const week = await dbQueryOne<WeekRow>(
-      `SELECT id, group_id, start_date::text, voting_close_at::text, resolved_reading_id, status, reminder_sent_at::text
+      `SELECT id, group_id, start_date, voting_close_at::text, resolved_reading_id, status, reminder_sent_at::text
        FROM weeks
        WHERE id = $1
        FOR UPDATE`,
@@ -413,6 +551,12 @@ async function maybeAutoResolveWeek(week: WeekRow): Promise<void> {
   const winner = await calculateWinner(week.id, group.tie_policy);
 
   if (!winner.proposalId || winner.status === "PENDING_MANUAL") {
+    const randomProposal = await pickRandomProposalForWeek(week.id);
+    if (randomProposal) {
+      await finalizeWeek(week.id, randomProposal.id);
+      return;
+    }
+
     await dbQuery(`UPDATE weeks SET status = 'PENDING_MANUAL' WHERE id = $1`, [week.id]);
     return;
   }
@@ -422,11 +566,13 @@ async function maybeAutoResolveWeek(week: WeekRow): Promise<void> {
 
 async function ensureCurrentWeek(groupId: string): Promise<WeekRow> {
   const week = await ensureCurrentWeekExists(groupId);
+  await ensureWeekReadingItem(week.id);
   await maybeSendVotingReminder(week);
   await maybeAutoResolveWeek(week);
+  await ensureWeekReadingItem(week.id);
 
   const refreshedWeek = await dbQueryOne<WeekRow>(
-    `SELECT id, group_id, start_date::text, voting_close_at::text, resolved_reading_id, status, reminder_sent_at::text
+    `SELECT id, group_id, start_date, voting_close_at::text, resolved_reading_id, status, reminder_sent_at::text
      FROM weeks
      WHERE id = $1`,
     [week.id],
@@ -465,6 +611,16 @@ export async function resolveCurrentWeek(
   const winner = await calculateWinner(week.id, group.tie_policy);
 
   if (!winner.proposalId || winner.status === "PENDING_MANUAL") {
+    const randomProposal = await pickRandomProposalForWeek(week.id);
+    if (randomProposal) {
+      const randomResult = await finalizeWeek(week.id, randomProposal.id, userId);
+      return {
+        status: randomResult.weekStatus,
+        readingItemId: randomResult.readingItemId,
+        reference: randomResult.reference,
+      };
+    }
+
     await dbQuery(`UPDATE weeks SET status = 'PENDING_MANUAL' WHERE id = $1`, [week.id]);
     return { status: "PENDING_MANUAL", readingItemId: null, reference: null };
   }
@@ -509,7 +665,7 @@ export async function getGroupSnapshot(groupId: string, userId: string) {
        LEFT JOIN votes v ON v.proposal_id = p.id
        WHERE p.week_id = $1
          AND p.deleted_at IS NULL
-       GROUP BY p.id, u.name
+       GROUP BY p.id, p.reference, p.note, p.proposer_id, p.created_at, p.is_seed, u.name
        ORDER BY COUNT(v.id) DESC, p.created_at ASC`,
       [week.id],
     ),
@@ -558,7 +714,7 @@ export async function getGroupSnapshot(groupId: string, userId: string) {
     }>(
       `SELECT
          w.id AS week_id,
-         w.start_date::text,
+         w.start_date,
          ri.reference,
          COUNT(DISTINCT c.id)::text AS comments_count,
          COUNT(DISTINCT CASE WHEN rm.status = 'READ' THEN rm.user_id END)::text AS read_count
@@ -569,7 +725,7 @@ export async function getGroupSnapshot(groupId: string, userId: string) {
        WHERE w.group_id = $1
          AND w.id <> $2
          AND w.resolved_reading_id IS NOT NULL
-       GROUP BY w.id, ri.reference
+       GROUP BY w.id, w.start_date, ri.reference
        ORDER BY w.start_date DESC
        LIMIT 8`,
       [groupId, week.id],
@@ -686,8 +842,8 @@ export async function addProposal(params: {
 export async function removeProposal(params: { groupId: string; userId: string; proposalId: string }) {
   const member = await requireMembership(params.groupId, params.userId);
 
-  const proposal = await dbQueryOne<{ proposer_id: string; week_id: string }>(
-    `SELECT p.proposer_id, p.week_id
+  const proposal = await dbQueryOne<{ proposer_id: string; week_id: string; week_status: WeekStatus }>(
+    `SELECT p.proposer_id, p.week_id, w.status AS week_status
      FROM proposals p
      JOIN weeks w ON w.id = p.week_id
      WHERE p.id = $1
@@ -707,6 +863,23 @@ export async function removeProposal(params: { groupId: string; userId: string; 
   }
 
   await dbQuery(`UPDATE proposals SET deleted_at = NOW() WHERE id = $1`, [params.proposalId]);
+
+  if (proposal.week_status !== "RESOLVED") {
+    const remaining = await dbQueryOne<{ count: string }>(
+      `SELECT COUNT(*)::text AS count
+       FROM proposals
+       WHERE week_id = $1
+         AND deleted_at IS NULL`,
+      [proposal.week_id],
+    );
+
+    if (Number(remaining?.count ?? 0) === 0) {
+      const group = await getGroup(params.groupId);
+      await insertSeedProposals(params.groupId, proposal.week_id, group.owner_id, 1);
+    }
+
+    await ensureWeekReadingItem(proposal.week_id);
+  }
 
   return { ok: true };
 }
@@ -738,6 +911,8 @@ export async function castVote(params: { groupId: string; userId: string; propos
      DO UPDATE SET proposal_id = EXCLUDED.proposal_id, created_at = NOW()`,
     [week.id, params.proposalId, params.userId],
   );
+
+  await syncReadingToVoteLeader(week.id);
 
   // Auto-resolve: check if all members have voted
   const [voteResult, memberResult] = await Promise.all([
@@ -1245,8 +1420,8 @@ export async function rerollSeedProposal(params: {
 }) {
   await requireAdmin(params.groupId, params.userId);
 
-  const proposal = await dbQueryOne<{ id: string; week_id: string; is_seed: boolean }>(
-    `SELECT p.id, p.week_id, p.is_seed
+  const proposal = await dbQueryOne<{ id: string; week_id: string; is_seed: boolean; week_status: WeekStatus }>(
+    `SELECT p.id, p.week_id, p.is_seed, w.status AS week_status
      FROM proposals p
      JOIN weeks w ON w.id = p.week_id
      WHERE p.id = $1 AND w.group_id = $2 AND p.deleted_at IS NULL`,
@@ -1284,6 +1459,10 @@ export async function rerollSeedProposal(params: {
     );
   }
 
+  if (proposal.week_status !== "RESOLVED") {
+    await ensureWeekReadingItem(proposal.week_id);
+  }
+
   return { ok: true };
 }
 
@@ -1306,7 +1485,7 @@ export async function startNewVote(params: { groupId: string; userId: string }) 
 
   const newWeek = await dbQueryOne<{ id: string }>(
     `INSERT INTO weeks(group_id, start_date, voting_close_at, status)
-     VALUES ($1, CURRENT_DATE, NOW() + make_interval(hours => $2), 'VOTING_OPEN')
+     VALUES ($1, CURRENT_DATE, NOW() + (interval '1 hour' * $2::int), 'VOTING_OPEN')
      RETURNING id`,
     [params.groupId, votingHours],
   );
@@ -1314,6 +1493,7 @@ export async function startNewVote(params: { groupId: string; userId: string }) 
   if (!newWeek) throw new ServiceError("Failed to create new vote round", 500);
 
   await insertSeedProposals(params.groupId, newWeek.id, group.owner_id);
+  await ensureWeekReadingItem(newWeek.id);
 
   await notifyGroupMembers(
     params.groupId,
@@ -1371,5 +1551,37 @@ export async function getBootstrapData() {
       email: user.email,
       language: user.default_language,
     })),
+  };
+}
+
+export async function runWeeklyRollover(params?: { groupId?: string }) {
+  const targetGroups = params?.groupId
+    ? [{ id: params.groupId }]
+    : await dbQuery<{ id: string }>(
+        `SELECT id
+         FROM groups
+         ORDER BY created_at ASC`,
+      );
+
+  const processedGroupIds: string[] = [];
+  const failed: Array<{ groupId: string; error: string }> = [];
+
+  for (const group of targetGroups) {
+    try {
+      await ensureCurrentWeek(group.id);
+      processedGroupIds.push(group.id);
+    } catch (error) {
+      failed.push({
+        groupId: group.id,
+        error: error instanceof Error ? error.message : "Unknown error",
+      });
+    }
+  }
+
+  return {
+    processed: processedGroupIds.length,
+    failed: failed.length,
+    processedGroupIds,
+    failures: failed,
   };
 }
