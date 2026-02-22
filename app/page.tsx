@@ -1038,17 +1038,6 @@ export default function Home() {
     })();
   }
 
-  function onCreateInvite() {
-    if (!groupId || !selectedUserId) return;
-    void mutate(async () => {
-      const payload = await api<{ token: string }>(`/api/groups/${groupId}/invites`, {
-        method: "POST",
-        body: JSON.stringify({}),
-      });
-      setInviteToken(payload.token);
-    });
-  }
-
   function onSendInvite() {
     if (!groupId || !selectedUserId || !inviteName.trim()) return;
     void (async () => {
@@ -1363,22 +1352,44 @@ export default function Home() {
 
           {snapshot && (
             <>
-              <div className="drawer-label" style={{ marginTop: 16 }}>Share Invite</div>
-              {inviteToken ? (
-                <div className="invite-display">
-                  <code>{inviteToken}</code>
-                </div>
-              ) : (
-                <div className="text-tertiary" style={{ fontSize: 13 }}>No active invite</div>
-              )}
+              <div className="drawer-label" style={{ marginTop: 16 }}>Invite Link</div>
               <button
-                className="btn btn-sm"
-                style={{ marginTop: 8, width: "100%" }}
-                onClick={onCreateInvite}
+                className="btn btn-gold btn-sm"
+                style={{ width: "100%" }}
+                onClick={async () => {
+                  let token = inviteToken;
+                  if (!token) {
+                    if (!groupId || !selectedUserId) return;
+                    try {
+                      setSubmitting(true);
+                      const payload = await api<{ token: string }>(`/api/groups/${groupId}/invites`, {
+                        method: "POST",
+                        body: JSON.stringify({}),
+                      });
+                      token = payload.token;
+                      setInviteToken(token);
+                    } catch {
+                      return;
+                    } finally {
+                      setSubmitting(false);
+                    }
+                  }
+                  const inviteUrl = `${window.location.origin}/invite/${token}`;
+                  if (navigator.share) {
+                    try {
+                      await navigator.share({ title: "Read the Bible Together", text: `Join our Bible reading group: ${inviteUrl}` });
+                    } catch {
+                      await navigator.clipboard.writeText(inviteUrl);
+                    }
+                  } else {
+                    await navigator.clipboard.writeText(inviteUrl);
+                    alert("Invite link copied to clipboard!");
+                  }
+                }}
                 type="button"
                 disabled={!isAdmin || submitting}
               >
-                Generate New Token
+                Generate Invite Link
               </button>
             </>
           )}
