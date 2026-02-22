@@ -101,6 +101,11 @@ type Snapshot = {
     weekId: string; startDate: string; reference: string;
     commentsCount: number; readCount: number;
   }>;
+  pendingInvites: Array<{
+    id: string; token: string; recipientName: string;
+    recipientContact: string | null; createdBy: string;
+    creatorName: string; createdAt: string;
+  }>;
 };
 
 type Comment = {
@@ -242,6 +247,9 @@ export default function Home() {
   // Invite
   const [joinToken, setJoinToken] = useState("");
   const [inviteToken, setInviteToken] = useState("");
+  const [showInviteForm, setShowInviteForm] = useState(false);
+  const [inviteName, setInviteName] = useState("");
+  const [inviteContact, setInviteContact] = useState("");
 
   // Bible text
   const [bibleText, setBibleText] = useState<BibleText | null>(null);
@@ -618,6 +626,73 @@ export default function Home() {
       });
       setInviteToken(payload.token);
     });
+  }
+
+  function onSendInvite() {
+    if (!groupId || !selectedUserId || !inviteName.trim()) return;
+    void (async () => {
+      try {
+        setSubmitting(true);
+        setError("");
+        const payload = await api<{ token: string }>(`/api/groups/${groupId}/invites`, {
+          method: "POST",
+          body: JSON.stringify({
+            recipientName: inviteName.trim(),
+            recipientContact: inviteContact.trim() || undefined,
+          }),
+        });
+        setInviteName("");
+        setInviteContact("");
+        setShowInviteForm(false);
+
+        const inviteUrl = `${window.location.origin}/invite/${payload.token}`;
+        const shareText = `Hey${inviteName.trim() ? ` ${inviteName.trim()}` : ""}! Join my Bible reading group on Bible Vote: ${inviteUrl}`;
+
+        // Try Web Share API first (mobile), then fall back to clipboard
+        if (navigator.share) {
+          try {
+            await navigator.share({ title: "Bible Vote Invite", text: shareText });
+          } catch {
+            // User cancelled share — still copy to clipboard
+            await navigator.clipboard.writeText(inviteUrl);
+          }
+        } else {
+          await navigator.clipboard.writeText(inviteUrl);
+          alert("Invite link copied to clipboard!");
+        }
+
+        await refreshData();
+      } catch (err) {
+        setError(err instanceof Error ? err.message : "Failed to create invite");
+      } finally {
+        setSubmitting(false);
+      }
+    })();
+  }
+
+  function onCancelInvite(inviteId: string) {
+    if (!groupId || !selectedUserId) return;
+    void mutate(async () => {
+      await api(`/api/groups/${groupId}/invites`, {
+        method: "DELETE",
+        body: JSON.stringify({ inviteId }),
+      });
+    });
+  }
+
+  function onShareInviteLink(token: string, recipientName: string) {
+    const inviteUrl = `${window.location.origin}/invite/${token}`;
+    const shareText = `Hey ${recipientName}! Join my Bible reading group on Bible Vote: ${inviteUrl}`;
+
+    if (navigator.share) {
+      void navigator.share({ title: "Bible Vote Invite", text: shareText }).catch(() => {
+        void navigator.clipboard.writeText(inviteUrl);
+      });
+    } else {
+      void navigator.clipboard.writeText(inviteUrl).then(() => {
+        alert("Invite link copied to clipboard!");
+      });
+    }
   }
 
   function onReroll(proposalId: string) {
@@ -1517,6 +1592,87 @@ export default function Home() {
                     );
                   })}
                 </div>
+
+                {/* Pending Invites */}
+                {snapshot.pendingInvites.length > 0 && (
+                  <div className="card stack">
+                    <div className="section-title" style={{ fontSize: 16 }}>Pending Invites</div>
+                    {snapshot.pendingInvites.map((inv) => (
+                      <div key={inv.id} className="pending-invite">
+                        <div className="pending-invite-info">
+                          <span className="avatar avatar-sm pending-avatar">{getAvatar(inv.recipientName)}</span>
+                          <div>
+                            <div className="pending-invite-name">{inv.recipientName}</div>
+                            <div className="pending-invite-meta">
+                              {inv.recipientContact && <span>{inv.recipientContact} &middot; </span>}
+                              Invited by {inv.creatorName} &middot; {relativeTime(inv.createdAt)}
+                            </div>
+                          </div>
+                        </div>
+                        <div className="pending-invite-actions">
+                          <button
+                            className="btn btn-sm"
+                            onClick={() => onShareInviteLink(inv.token, inv.recipientName)}
+                            type="button"
+                          >
+                            Resend
+                          </button>
+                          {(inv.createdBy === selectedUserId || isAdmin) && (
+                            <button
+                              className="btn btn-sm btn-danger"
+                              onClick={() => onCancelInvite(inv.id)}
+                              disabled={submitting}
+                              type="button"
+                            >
+                              Cancel
+                            </button>
+                          )}
+                        </div>
+                      </div>
+                    ))}
+                  </div>
+                )}
+
+                {/* Invite a Friend */}
+                {!showInviteForm ? (
+                  <button
+                    className="btn btn-gold invite-friend-btn"
+                    onClick={() => setShowInviteForm(true)}
+                    type="button"
+                  >
+                    <IconPlus /> Invite a Friend
+                  </button>
+                ) : (
+                  <div className="card stack">
+                    <div className="section-title" style={{ fontSize: 16 }}>Invite a Friend</div>
+                    <input
+                      className="input"
+                      value={inviteName}
+                      onChange={(e) => setInviteName(e.target.value)}
+                      placeholder="Friend's name"
+                      maxLength={80}
+                    />
+                    <input
+                      className="input"
+                      value={inviteContact}
+                      onChange={(e) => setInviteContact(e.target.value)}
+                      placeholder="Email or phone (optional)"
+                    />
+                    <div className="row">
+                      <button
+                        className="btn btn-gold"
+                        onClick={onSendInvite}
+                        type="button"
+                        disabled={submitting || !inviteName.trim()}
+                      >
+                        Create &amp; Share Link
+                      </button>
+                      <button className="btn" onClick={() => setShowInviteForm(false)} type="button">
+                        Cancel
+                      </button>
+                    </div>
+                  </div>
+                )}
               </section>
             )}
           </>

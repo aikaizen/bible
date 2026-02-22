@@ -1132,6 +1132,127 @@ button, input, textarea, select {
   background: var(--bg-surface-hover);
 }
 
+/* ─── Invite Feature ─── */
+
+.invite-friend-btn {
+  width: 100%;
+}
+
+.pending-invite {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 10px 0;
+  border-bottom: 1px solid var(--border);
+}
+
+.pending-invite:last-child {
+  border-bottom: none;
+}
+
+.pending-invite-info {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  min-width: 0;
+  flex: 1;
+}
+
+.pending-avatar {
+  background: var(--border-strong) !important;
+  color: var(--text-tertiary) !important;
+  border: 1px dashed var(--text-tertiary);
+}
+
+.pending-invite-name {
+  font-size: 14px;
+  font-weight: 500;
+  color: var(--text);
+}
+
+.pending-invite-meta {
+  font-size: 11px;
+  color: var(--text-tertiary);
+  margin-top: 1px;
+}
+
+.pending-invite-actions {
+  display: flex;
+  gap: 6px;
+  flex-shrink: 0;
+}
+
+/* ─── Invite Landing Page ─── */
+
+.invite-page {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  min-height: 100vh;
+  padding: 20px;
+  background: radial-gradient(ellipse at 50% 30%, rgba(201, 169, 110, 0.06), transparent 70%), var(--bg);
+}
+
+.invite-card {
+  width: min(420px, 100%);
+  text-align: center;
+  animation: fade-in 0.4s var(--ease) both;
+}
+
+.invite-brand {
+  font-family: var(--font-display);
+  font-size: 38px;
+  font-weight: 700;
+  letter-spacing: -0.5px;
+  color: var(--text);
+  margin-bottom: 20px;
+}
+
+.invite-message {
+  font-size: 16px;
+  color: var(--text-secondary);
+  line-height: 1.5;
+}
+
+.invite-group-name {
+  font-family: var(--font-display);
+  font-size: 28px;
+  font-weight: 600;
+  color: var(--gold);
+  margin: 8px 0;
+  letter-spacing: -0.3px;
+}
+
+.invite-recipient {
+  font-size: 15px;
+  color: var(--text);
+  margin: 12px 0;
+}
+
+.invite-subtitle {
+  font-size: 14px;
+  color: var(--text-tertiary);
+  line-height: 1.5;
+  margin-top: 8px;
+}
+
+.invite-loading {
+  font-size: 14px;
+  color: var(--text-tertiary);
+  margin-top: 12px;
+  animation: pulse 1.5s ease-in-out infinite;
+}
+
+.invite-invalid {
+  font-size: 15px;
+  color: var(--danger);
+  padding: 16px;
+  border-radius: var(--radius-sm);
+  background: var(--danger-dim);
+  border: 1px solid rgba(217, 119, 119, 0.2);
+}
+
 /* ─── Scrollbar ─── */
 
 ::-webkit-scrollbar { width: 6px; }

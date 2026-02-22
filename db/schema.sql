@@ -189,6 +189,36 @@ END
 $$;
 CREATE INDEX IF NOT EXISTS idx_weeks_group_start ON weeks(group_id, start_date);
 
+-- Invite tracking: recipient info and status
+DO $$
+BEGIN
+  IF NOT EXISTS (
+    SELECT 1 FROM information_schema.columns
+    WHERE table_name = 'invites' AND column_name = 'recipient_name'
+  ) THEN
+    ALTER TABLE invites ADD COLUMN recipient_name TEXT;
+  END IF;
+  IF NOT EXISTS (
+    SELECT 1 FROM information_schema.columns
+    WHERE table_name = 'invites' AND column_name = 'recipient_contact'
+  ) THEN
+    ALTER TABLE invites ADD COLUMN recipient_contact TEXT;
+  END IF;
+  IF NOT EXISTS (
+    SELECT 1 FROM information_schema.columns
+    WHERE table_name = 'invites' AND column_name = 'status'
+  ) THEN
+    ALTER TABLE invites ADD COLUMN status TEXT NOT NULL DEFAULT 'pending';
+  END IF;
+  IF NOT EXISTS (
+    SELECT 1 FROM information_schema.columns
+    WHERE table_name = 'invites' AND column_name = 'accepted_by'
+  ) THEN
+    ALTER TABLE invites ADD COLUMN accepted_by UUID REFERENCES users(id) ON DELETE SET NULL;
+  END IF;
+END
+$$;
+
 -- Google OAuth: stable account linking via Google sub ID
 DO $$
 BEGIN

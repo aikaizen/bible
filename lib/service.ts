@@ -636,7 +636,7 @@ export async function getGroupSnapshot(groupId: string, userId: string) {
     getGroup(groupId),
   ]);
 
-  const [members, proposals, votes, myVote, readingItem, history, invite] = await Promise.all([
+  const [members, proposals, votes, myVote, readingItem, history, invite, pendingInvites] = await Promise.all([
     dbQuery<{
       id: string;
       name: string;
@@ -739,6 +739,26 @@ export async function getGroupSnapshot(groupId: string, userId: string) {
        LIMIT 1`,
       [groupId],
     ),
+    dbQuery<{
+      id: string;
+      token: string;
+      recipient_name: string;
+      recipient_contact: string | null;
+      created_by: string;
+      creator_name: string;
+      created_at: string;
+    }>(
+      `SELECT i.id, i.token, i.recipient_name, i.recipient_contact,
+              i.created_by, u.name AS creator_name, i.created_at::text
+       FROM invites i
+       JOIN users u ON u.id = i.created_by
+       WHERE i.group_id = $1
+         AND i.status = 'pending'
+         AND i.recipient_name IS NOT NULL
+         AND (i.expires_at IS NULL OR i.expires_at > NOW())
+       ORDER BY i.created_at DESC`,
+      [groupId],
+    ),
   ]);
 
   const readMarks = readingItem
@@ -804,6 +824,15 @@ export async function getGroupSnapshot(groupId: string, userId: string) {
       reference: item.reference,
       commentsCount: Number(item.comments_count),
       readCount: Number(item.read_count),
+    })),
+    pendingInvites: pendingInvites.map((inv) => ({
+      id: inv.id,
+      token: inv.token,
+      recipientName: inv.recipient_name,
+      recipientContact: inv.recipient_contact,
+      createdBy: inv.created_by,
+      creatorName: inv.creator_name,
+      createdAt: inv.created_at,
     })),
   };
 }
@@ -1323,9 +1352,106 @@ export async function createInvite(params: { groupId: string; userId: string; ex
   return { token };
 }
 
+export async function createPersonalInvite(params: {
+  groupId: string;
+  userId: string;
+  recipientName: string;
+  recipientContact?: string;
+}) {
+  await requireMembership(params.groupId, params.userId);
+
+  const name = params.recipientName.trim().slice(0, 80);
+  if (!name) throw new ServiceError("Recipient name is required", 422);
+
+  const token = crypto.randomBytes(6).toString("base64url");
+
+  await dbQuery(
+    `INSERT INTO invites(group_id, token, created_by, recipient_name, recipient_contact, status)
+     VALUES ($1, $2, $3, $4, $5, 'pending')`,
+    [params.groupId, token, params.userId, name, params.recipientContact?.trim() || null],
+  );
+
+  return { token };
+}
+
+export async function getPendingInvites(groupId: string, userId: string) {
+  await requireMembership(groupId, userId);
+
+  const rows = await dbQuery<{
+    id: string;
+    token: string;
+    recipient_name: string;
+    recipient_contact: string | null;
+    created_by: string;
+    creator_name: string;
+    created_at: string;
+  }>(
+    `SELECT i.id, i.token, i.recipient_name, i.recipient_contact,
+            i.created_by, u.name AS creator_name, i.created_at::text
+     FROM invites i
+     JOIN users u ON u.id = i.created_by
+     WHERE i.group_id = $1
+       AND i.status = 'pending'
+       AND i.recipient_name IS NOT NULL
+       AND (i.expires_at IS NULL OR i.expires_at > NOW())
+     ORDER BY i.created_at DESC`,
+    [groupId],
+  );
+
+  return rows.map((r) => ({
+    id: r.id,
+    token: r.token,
+    recipientName: r.recipient_name,
+    recipientContact: r.recipient_contact,
+    createdBy: r.created_by,
+    creatorName: r.creator_name,
+    createdAt: r.created_at,
+  }));
+}
+
+export async function cancelInvite(params: { inviteId: string; groupId: string; userId: string }) {
+  const member = await requireMembership(params.groupId, params.userId);
+
+  const invite = await dbQueryOne<{ id: string; created_by: string; status: string }>(
+    `SELECT id, created_by, status
+     FROM invites
+     WHERE id = $1 AND group_id = $2`,
+    [params.inviteId, params.groupId],
+  );
+
+  if (!invite) throw new ServiceError("Invite not found", 404);
+  if (invite.status !== "pending") throw new ServiceError("Invite is not pending", 400);
+
+  const isInviteAdmin = mapRoleWeight(member.role) >= mapRoleWeight("ADMIN");
+  if (invite.created_by !== params.userId && !isInviteAdmin) {
+    throw new ServiceError("Only the inviter or an admin can cancel this invite", 403);
+  }
+
+  await dbQuery(`UPDATE invites SET status = 'cancelled' WHERE id = $1`, [params.inviteId]);
+  return { ok: true };
+}
+
+export async function getInviteByToken(token: string) {
+  return dbQueryOne<{
+    group_id: string;
+    group_name: string;
+    creator_name: string;
+    recipient_name: string | null;
+  }>(
+    `SELECT i.group_id, g.name AS group_name, u.name AS creator_name, i.recipient_name
+     FROM invites i
+     JOIN groups g ON g.id = i.group_id
+     JOIN users u ON u.id = i.created_by
+     WHERE i.token = $1
+       AND (i.expires_at IS NULL OR i.expires_at > NOW())
+       AND i.status = 'pending'`,
+    [token],
+  );
+}
+
 export async function joinGroupByInvite(params: { token: string; userId: string }) {
-  const invite = await dbQueryOne<{ group_id: string }>(
-    `SELECT group_id
+  const invite = await dbQueryOne<{ group_id: string; id: string; recipient_name: string | null }>(
+    `SELECT group_id, id, recipient_name
      FROM invites
      WHERE token = $1
        AND (expires_at IS NULL OR expires_at > NOW())`,
@@ -1342,6 +1468,14 @@ export async function joinGroupByInvite(params: { token: string; userId: string 
      ON CONFLICT (group_id, user_id) DO NOTHING`,
     [invite.group_id, params.userId],
   );
+
+  // Mark personal invites as accepted
+  if (invite.recipient_name) {
+    await dbQuery(
+      `UPDATE invites SET status = 'accepted', accepted_by = $1 WHERE id = $2 AND status = 'pending'`,
+      [params.userId, invite.id],
+    );
+  }
 
   return { groupId: invite.group_id };
 }
