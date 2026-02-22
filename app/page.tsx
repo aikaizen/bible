@@ -276,7 +276,7 @@ export default function Home() {
   const { data: session, status: sessionStatus } = useSession();
   const selectedUserId = session?.user?.id ?? "";
 
-  const [tab, setTab] = useState<"vote" | "reading" | "history" | "squad">("vote");
+  const [tab, setTab] = useState<"vote" | "reading" | "history" | "group">("vote");
   const [groupId, setGroupId] = useState("");
   const [snapshot, setSnapshot] = useState<Snapshot | null>(null);
   const [comments, setComments] = useState<Comment[]>([]);
@@ -1090,6 +1090,17 @@ export default function Home() {
     });
   }
 
+  function onRemoveMember(targetUserId: string, memberName: string) {
+    if (!groupId || !selectedUserId) return;
+    if (!confirm(`Remove ${memberName} from this group?`)) return;
+    void mutate(async () => {
+      await api(`/api/groups/${groupId}/members`, {
+        method: "DELETE",
+        body: JSON.stringify({ targetUserId }),
+      });
+    });
+  }
+
   function onShareInviteLink(token: string, recipientName: string) {
     const inviteUrl = `${window.location.origin}/invite/${token}`;
     const shareText = `Hey ${recipientName}! Join me on a journey to read the Bible together: ${inviteUrl}`;
@@ -1480,9 +1491,9 @@ export default function Home() {
           <IconClock />
           <span className="tab-label">History</span>
         </button>
-        <button className={`tab-item ${tab === "squad" ? "active" : ""}`} onClick={() => setTab("squad")} type="button">
+        <button className={`tab-item ${tab === "group" ? "active" : ""}`} onClick={() => setTab("group")} type="button">
           <IconUsers />
-          <span className="tab-label">Squad</span>
+          <span className="tab-label">Group</span>
         </button>
       </nav>
 
@@ -2070,9 +2081,9 @@ export default function Home() {
             )}
 
             {/* ── SQUAD TAB ── */}
-            {tab === "squad" && (
+            {tab === "group" && (
               <section className="stack fade-in">
-                <div className="section-title">Squad</div>
+                <div className="section-title">Group</div>
 
                 <div className="stat-grid">
                   <div className="stat-card">
@@ -2090,6 +2101,8 @@ export default function Home() {
                     const proposed = snapshot.proposals.filter((p) => p.proposerId === m.id && !p.isSeed).length;
                     const voted = snapshot.proposals.filter((p) => p.voters.some((v) => v.id === m.id)).length;
                     const readSt = snapshot.readMarks.find((rm) => rm.userId === m.id)?.status ?? "NOT_MARKED";
+                    const canRemove = isAdmin && m.id !== selectedUserId && m.role !== "OWNER"
+                      && (snapshot.myRole === "OWNER" || m.role !== "ADMIN");
                     return (
                       <div key={m.id} className="member-card">
                         <span className="avatar" style={{ background: colorFor(m.id) }}>{getAvatar(m.name)}</span>
@@ -2102,6 +2115,17 @@ export default function Home() {
                           <div>Voted: {voted > 0 ? "yes" : "no"}</div>
                           <div>Read: {readSt === "READ" ? "yes" : readSt === "PLANNED" ? "planned" : "no"}</div>
                         </div>
+                        {canRemove && (
+                          <button
+                            className="btn btn-sm btn-danger"
+                            onClick={() => onRemoveMember(m.id, m.name)}
+                            disabled={submitting}
+                            type="button"
+                            title={`Remove ${m.name}`}
+                          >
+                            Remove
+                          </button>
+                        )}
                       </div>
                     );
                   })}

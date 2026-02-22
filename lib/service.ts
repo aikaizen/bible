@@ -1678,6 +1678,41 @@ export async function startNewVote(params: { groupId: string; userId: string }) 
   return { weekId: newWeek.id };
 }
 
+export async function removeMember(params: {
+  groupId: string;
+  userId: string;
+  targetUserId: string;
+}) {
+  await requireAdmin(params.groupId, params.userId);
+
+  if (params.targetUserId === params.userId) {
+    throw new ServiceError("You cannot remove yourself", 400);
+  }
+
+  const target = await getMembership(params.groupId, params.targetUserId);
+  if (!target) {
+    throw new ServiceError("User is not a member of this group", 404);
+  }
+
+  // Prevent removing the owner
+  if (target.role === "OWNER") {
+    throw new ServiceError("Cannot remove the group owner", 403);
+  }
+
+  // Admins can only be removed by the owner
+  const actor = await requireMembership(params.groupId, params.userId);
+  if (target.role === "ADMIN" && actor.role !== "OWNER") {
+    throw new ServiceError("Only the owner can remove admins", 403);
+  }
+
+  await dbQuery(
+    `DELETE FROM group_members WHERE group_id = $1 AND user_id = $2`,
+    [params.groupId, params.targetUserId],
+  );
+
+  return { ok: true };
+}
+
 export async function getUserGroups(userId: string) {
   return dbQuery<{
     id: string;
