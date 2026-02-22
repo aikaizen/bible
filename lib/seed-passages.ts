@@ -200,6 +200,21 @@ const SEED_PASSAGES: SeedPassage[] = [
 ];
 
 /**
+ * Deterministic PRNG seeded by a string (e.g. week start date).
+ * Same seed always produces the same sequence.
+ */
+function seededRandom(seed: string): () => number {
+  let h = 0;
+  for (let i = 0; i < seed.length; i++) {
+    h = ((h << 5) - h + seed.charCodeAt(i)) | 0;
+  }
+  return () => {
+    h = (h * 1103515245 + 12345) & 0x7fffffff;
+    return h / 0x7fffffff;
+  };
+}
+
+/**
  * Pick N unique seed passages, avoiding references the group has already read.
  * Tries to pick from diverse categories.
  */
@@ -234,6 +249,57 @@ export function pickSeedPassages(
     const cat = catPool[Math.floor(Math.random() * catPool.length)];
     const list = byCategory.get(cat)!;
     const idx = Math.floor(Math.random() * list.length);
+    const pick = list[idx];
+    result.push({ reference: pick.reference, note: pick.note });
+    list.splice(idx, 1);
+    if (list.length === 0) {
+      byCategory.delete(cat);
+      const ci = categories.indexOf(cat);
+      if (ci >= 0) categories.splice(ci, 1);
+    }
+    usedCategories.add(cat);
+  }
+
+  return result.slice(0, count);
+}
+
+/**
+ * Pick N seed passages deterministically based on a week start date.
+ * Every group with the same startDate gets the same seeds.
+ * Avoids references that have been read in ANY group (global history).
+ */
+export function pickGlobalSeedsForDate(
+  startDate: string,
+  count: number,
+  alreadyReadReferences: string[],
+): Array<{ reference: string; note: string }> {
+  const readSet = new Set(alreadyReadReferences.map((r) => r.toLowerCase().trim()));
+  const rand = seededRandom(startDate);
+
+  const available = SEED_PASSAGES.filter(
+    (p) => !readSet.has(p.reference.toLowerCase().trim()),
+  );
+
+  if (available.length === 0) return [];
+
+  // Group by category
+  const byCategory = new Map<string, SeedPassage[]>();
+  for (const p of available) {
+    const list = byCategory.get(p.category) ?? [];
+    list.push(p);
+    byCategory.set(p.category, list);
+  }
+
+  const categories = Array.from(byCategory.keys());
+  const result: Array<{ reference: string; note: string }> = [];
+  const usedCategories = new Set<string>();
+
+  for (let i = 0; i < count && categories.length > 0; i++) {
+    const unusedCategories = categories.filter((c) => !usedCategories.has(c));
+    const catPool = unusedCategories.length > 0 ? unusedCategories : categories;
+    const cat = catPool[Math.floor(rand() * catPool.length)];
+    const list = byCategory.get(cat)!;
+    const idx = Math.floor(rand() * list.length);
     const pick = list[idx];
     result.push({ reference: pick.reference, note: pick.note });
     list.splice(idx, 1);

@@ -274,3 +274,21 @@ BEGIN
   END IF;
 END
 $$;
+
+-- User profile: avatar presets and uploaded images
+DO $$
+BEGIN
+  IF NOT EXISTS (
+    SELECT 1 FROM information_schema.columns
+    WHERE table_name = 'users' AND column_name = 'avatar_preset'
+  ) THEN
+    ALTER TABLE users ADD COLUMN avatar_preset TEXT;
+  END IF;
+  IF NOT EXISTS (
+    SELECT 1 FROM information_schema.columns
+    WHERE table_name = 'users' AND column_name = 'avatar_image'
+  ) THEN
+    ALTER TABLE users ADD COLUMN avatar_image TEXT;
+  END IF;
+END
+$$;

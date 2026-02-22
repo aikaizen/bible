@@ -3,7 +3,7 @@ import { PoolClient } from "pg";
 
 import { dbQuery, dbQueryOne, withTransaction } from "./db";
 import { isValidReference, normalizeReference } from "./reference";
-import { pickSeedPassages } from "./seed-passages";
+import { pickGlobalSeedsForDate, pickSeedPassages } from "./seed-passages";
 
 export type ReadStatus = "NOT_MARKED" | "PLANNED" | "READ";
 export type TiePolicy = "ADMIN_PICK" | "RANDOM" | "EARLIEST";
@@ -298,18 +298,19 @@ async function insertSeedProposals(
   weekId: string,
   ownerId: string,
   count = 3,
+  startDate?: string,
 ): Promise<void> {
-  // Get all references the group has already read or proposed
+  // Get all references read across ALL groups (global history for seed sync)
   const pastReferences = await dbQuery<{ reference: string }>(
-    `SELECT DISTINCT ri.reference
-     FROM reading_items ri
-     JOIN weeks w ON w.id = ri.week_id
-     WHERE w.group_id = $1`,
-    [groupId],
+    `SELECT DISTINCT ri.reference FROM reading_items ri`,
   );
 
   const alreadyRead = pastReferences.map((r) => r.reference);
-  const seeds = pickSeedPassages(count, alreadyRead);
+
+  // Use deterministic selection when startDate is provided (syncs seeds across groups)
+  const seeds = startDate
+    ? pickGlobalSeedsForDate(startDate, count, alreadyRead)
+    : pickSeedPassages(count, alreadyRead);
 
   for (const seed of seeds) {
     await dbQuery(
@@ -349,7 +350,7 @@ async function ensureCurrentWeekExists(groupId: string): Promise<WeekRow> {
   );
 
   if (inserted) {
-    await insertSeedProposals(groupId, inserted.id, group.owner_id);
+    await insertSeedProposals(groupId, inserted.id, group.owner_id, 3, meta.startDate);
     await ensureWeekReadingItem(inserted.id);
 
     await notifyGroupMembers(
@@ -1654,16 +1655,16 @@ export async function startNewVote(params: { groupId: string; userId: string }) 
   const group = await getGroup(params.groupId);
   const votingHours = group.voting_duration_hours;
 
-  const newWeek = await dbQueryOne<{ id: string }>(
+  const newWeek = await dbQueryOne<{ id: string; start_date: string }>(
     `INSERT INTO weeks(group_id, start_date, voting_close_at, status)
      VALUES ($1, CURRENT_DATE, NOW() + (interval '1 hour' * $2::int), 'VOTING_OPEN')
-     RETURNING id`,
+     RETURNING id, start_date::text`,
     [params.groupId, votingHours],
   );
 
   if (!newWeek) throw new ServiceError("Failed to create new vote round", 500);
 
-  await insertSeedProposals(params.groupId, newWeek.id, group.owner_id);
+  await insertSeedProposals(params.groupId, newWeek.id, group.owner_id, 3, newWeek.start_date);
   await ensureWeekReadingItem(newWeek.id);
 
   await notifyGroupMembers(
@@ -2011,6 +2012,170 @@ export async function createProposalComment(params: {
   );
 
   return { commentId: comment?.id ?? null };
+}
+
+/* ─── User Profile ─── */
+
+const AVATAR_PRESETS = ["cross", "dove", "fish", "olive", "lamp", "hands", "scroll", "star"];
+
+export async function getUserProfile(userId: string) {
+  const user = await dbQueryOne<{
+    id: string;
+    name: string;
+    email: string;
+    avatar_preset: string | null;
+    avatar_image: string | null;
+    created_at: string;
+  }>(
+    `SELECT id, name, email, avatar_preset, avatar_image, created_at::text
+     FROM users WHERE id = $1`,
+    [userId],
+  );
+  if (!user) throw new ServiceError("User not found", 404);
+  return user;
+}
+
+export async function updateUserProfile(params: {
+  userId: string;
+  name?: string;
+  avatarPreset?: string | null;
+  avatarImage?: string | null;
+}) {
+  const updates: string[] = [];
+  const values: unknown[] = [];
+  let paramIndex = 1;
+
+  if (params.name !== undefined) {
+    const name = params.name.trim();
+    if (!name || name.length > 60) throw new ServiceError("Name must be 1-60 characters", 422);
+    updates.push(`name = $${paramIndex++}`);
+    values.push(name);
+  }
+
+  if (params.avatarPreset !== undefined) {
+    if (params.avatarPreset !== null && !AVATAR_PRESETS.includes(params.avatarPreset)) {
+      throw new ServiceError("Invalid avatar preset", 422);
+    }
+    updates.push(`avatar_preset = $${paramIndex++}`);
+    values.push(params.avatarPreset);
+    // Setting preset clears image
+    if (params.avatarPreset !== null) {
+      updates.push(`avatar_image = NULL`);
+    }
+  }
+
+  if (params.avatarImage !== undefined) {
+    if (params.avatarImage !== null) {
+      if (!params.avatarImage.startsWith("data:image/")) {
+        throw new ServiceError("Invalid image format", 422);
+      }
+      if (params.avatarImage.length > 150000) {
+        throw new ServiceError("Image too large (max ~100KB)", 422);
+      }
+    }
+    updates.push(`avatar_image = $${paramIndex++}`);
+    values.push(params.avatarImage);
+    // Setting image clears preset
+    if (params.avatarImage !== null) {
+      updates.push(`avatar_preset = NULL`);
+    }
+  }
+
+  if (updates.length === 0) throw new ServiceError("No fields to update", 422);
+
+  values.push(params.userId);
+  await dbQuery(
+    `UPDATE users SET ${updates.join(", ")} WHERE id = $${paramIndex}`,
+    values,
+  );
+
+  return { ok: true };
+}
+
+export async function getUserReadHistory(userId: string) {
+  const rows = await dbQuery<{
+    reference: string;
+    start_date: string;
+    group_name: string;
+  }>(
+    `SELECT ri.reference, w.start_date::text, g.name AS group_name
+     FROM read_marks rm
+     JOIN reading_items ri ON ri.id = rm.reading_item_id
+     JOIN weeks w ON w.id = ri.week_id
+     JOIN groups g ON g.id = w.group_id
+     WHERE rm.user_id = $1 AND rm.status = 'READ'
+     ORDER BY w.start_date DESC
+     LIMIT 50`,
+    [userId],
+  );
+
+  const total = await dbQueryOne<{ count: string }>(
+    `SELECT COUNT(*)::text AS count FROM read_marks WHERE user_id = $1 AND status = 'READ'`,
+    [userId],
+  );
+
+  return {
+    totalRead: Number(total?.count ?? 0),
+    items: rows.map((r) => ({
+      reference: r.reference,
+      startDate: r.start_date,
+      groupName: r.group_name,
+    })),
+  };
+}
+
+export async function getUserCommentHistory(userId: string) {
+  const rows = await dbQuery<{
+    id: string;
+    text: string;
+    created_at: string;
+    source: string;
+    context: string;
+  }>(
+    `(
+      SELECT c.id, c.text, c.created_at::text, 'comment' AS source,
+             ri.reference AS context
+      FROM comments c
+      JOIN reading_items ri ON ri.id = c.reading_item_id
+      WHERE c.author_id = $1 AND c.deleted_at IS NULL
+    )
+    UNION ALL
+    (
+      SELECT pc.id, pc.text, pc.created_at::text, 'proposal_comment' AS source,
+             p.reference AS context
+      FROM proposal_comments pc
+      JOIN proposals p ON p.id = pc.proposal_id
+      WHERE pc.author_id = $1 AND pc.deleted_at IS NULL
+    )
+    UNION ALL
+    (
+      SELECT a.id, a.text, a.created_at::text, 'annotation' AS source,
+             ri.reference AS context
+      FROM annotations a
+      JOIN reading_items ri ON ri.id = a.reading_item_id
+      WHERE a.author_id = $1 AND a.deleted_at IS NULL
+    )
+    UNION ALL
+    (
+      SELECT ar.id, ar.text, ar.created_at::text, 'annotation_reply' AS source,
+             ri.reference AS context
+      FROM annotation_replies ar
+      JOIN annotations a ON a.id = ar.annotation_id
+      JOIN reading_items ri ON ri.id = a.reading_item_id
+      WHERE ar.author_id = $1 AND ar.deleted_at IS NULL
+    )
+    ORDER BY created_at DESC
+    LIMIT 50`,
+    [userId],
+  );
+
+  return rows.map((r) => ({
+    id: r.id,
+    text: r.text,
+    createdAt: r.created_at,
+    source: r.source,
+    context: r.context,
+  }));
 }
 
 export async function deleteProposalComment(params: { commentId: string; userId: string }) {

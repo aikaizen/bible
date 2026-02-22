@@ -136,6 +136,21 @@ type ProposalComment = {
   text: string; createdAt: string; canDelete: boolean;
 };
 
+type ProfileData = {
+  profile: {
+    id: string; name: string; email: string;
+    avatarPreset: string | null; avatarImage: string | null;
+    createdAt: string;
+  };
+  readHistory: {
+    totalRead: number;
+    items: Array<{ reference: string; startDate: string; groupName: string }>;
+  };
+  commentHistory: Array<{
+    id: string; text: string; createdAt: string; source: string; context: string;
+  }>;
+};
+
 type AnnotationReply = {
   id: string; authorId: string; authorName: string;
   text: string; createdAt: string; canDelete: boolean;
@@ -177,6 +192,33 @@ function IconPlus() {
 function IconSeed() {
   return <svg viewBox="0 0 24 24" style={{ width: 12, height: 12 }}><path d="M12 2C6.5 2 2 6.5 2 12s4.5 10 10 10 10-4.5 10-10S17.5 2 12 2zm0 4a2 2 0 110 4 2 2 0 010-4zm0 14c-2.67 0-8-1.34-8-4v-2c0-2.66 5.33-4 8-4s8 1.34 8 4v2c0 2.66-5.33 4-8 4z" /></svg>;
 }
+function IconCamera() {
+  return <svg viewBox="0 0 24 24" style={{ width: 16, height: 16 }}><path d="M23 19a2 2 0 01-2 2H3a2 2 0 01-2-2V8a2 2 0 012-2h4l2-3h6l2 3h4a2 2 0 012 2z" /><circle cx="12" cy="13" r="4" /></svg>;
+}
+
+/* ─── Avatar Preset SVGs ─── */
+
+const PRESET_SVGS: Record<string, React.ReactNode> = {
+  cross: <svg viewBox="0 0 24 24"><line x1="12" y1="2" x2="12" y2="22" /><line x1="6" y1="8" x2="18" y2="8" /></svg>,
+  dove: <svg viewBox="0 0 24 24"><path d="M12 3c-2 0-4 1.5-4 4 0 1.5.8 2.8 2 3.5L8 14l-4 2 3-1-3 5h4l2-3 2 3h4l-3-5 3 1-4-2-2-3.5c1.2-.7 2-2 2-3.5 0-2.5-2-4-4-4z" /><circle cx="10" cy="6" r="0.5" /></svg>,
+  fish: <svg viewBox="0 0 24 24"><path d="M2 12c3-4 7-6 12-6 2 0 3.5.5 5 1.5L22 12l-3 4.5c-1.5 1-3 1.5-5 1.5-5 0-9-2-12-6z" /><circle cx="17" cy="12" r="1" /></svg>,
+  olive: <svg viewBox="0 0 24 24"><path d="M12 22V8" /><path d="M8 10c-2-2-2-5 0-6s5 0 4 3" /><path d="M16 10c2-2 2-5 0-6s-5 0-4 3" /><path d="M7 15c-2-1.5-2.5-4-.5-5.5s4.5.5 3.5 3" /><path d="M17 15c2-1.5 2.5-4 .5-5.5s-4.5.5-3.5 3" /></svg>,
+  lamp: <svg viewBox="0 0 24 24"><path d="M9 21h6" /><path d="M10 18h4" /><path d="M12 2C8 2 5 5 5 9c0 2.5 1.5 4.5 3 6h8c1.5-1.5 3-3.5 3-6 0-4-3-7-7-7z" /><line x1="12" y1="10" x2="12" y2="14" /><line x1="10" y1="12" x2="14" y2="12" /></svg>,
+  hands: <svg viewBox="0 0 24 24"><path d="M7 20c0 0-3-2-3-6V9c0-1 1-1.5 1.5-1S7 9 7 9" /><path d="M7 9V5.5C7 4.5 7.5 4 8 4s1.5.5 1.5 1.5V9" /><path d="M9.5 8V3.5c0-1 .5-1.5 1.5-1.5s1.5.5 1.5 1.5V8" /><path d="M12.5 8V4c0-1 .5-1.5 1.5-1.5S15.5 3 15.5 4v4" /><path d="M17 20c0 0 3-2 3-6V9c0-1-1-1.5-1.5-1S17 9 17 9" /><path d="M17 9V5.5c0-1-.5-1.5-1-1.5" /></svg>,
+  scroll: <svg viewBox="0 0 24 24"><path d="M8 2H6a2 2 0 00-2 2v16a2 2 0 002 2h12a2 2 0 002-2V8l-6-6z" /><path d="M14 2v6h6" /><line x1="8" y1="12" x2="16" y2="12" /><line x1="8" y1="16" x2="14" y2="16" /></svg>,
+  star: <svg viewBox="0 0 24 24"><polygon points="12,2 9,9 2,9 7.5,14 5.5,21 12,17 18.5,21 16.5,14 22,9 15,9" /></svg>,
+};
+
+const PRESET_NAMES: Record<string, string> = {
+  cross: "Cross",
+  dove: "Dove",
+  fish: "Ichthys",
+  olive: "Olive",
+  lamp: "Lamp",
+  hands: "Hands",
+  scroll: "Scroll",
+  star: "Star",
+};
 
 /* ─── Helpers ─── */
 
@@ -268,6 +310,14 @@ export default function Home() {
   const [showInviteForm, setShowInviteForm] = useState(false);
   const [inviteName, setInviteName] = useState("");
   const [inviteContact, setInviteContact] = useState("");
+
+  // Profile
+  const [profileOpen, setProfileOpen] = useState(false);
+  const [profileData, setProfileData] = useState<ProfileData | null>(null);
+  const [profileLoading, setProfileLoading] = useState(false);
+  const [profileTab, setProfileTab] = useState<"readings" | "comments">("readings");
+  const [editingName, setEditingName] = useState(false);
+  const [profileNameDraft, setProfileNameDraft] = useState("");
 
   // Bible text
   const [bibleText, setBibleText] = useState<BibleText | null>(null);
@@ -437,6 +487,7 @@ export default function Home() {
       try {
         await api<BootstrapPayload>("/api/bootstrap");
 
+        void loadProfile();
         const groups = await loadUserGroups();
         const savedGroupId = window.localStorage.getItem("bible-app-group-id") ?? "";
         const initialGroupId = groups.some((g) => g.id === savedGroupId) ? savedGroupId : groups[0]?.id ?? "";
@@ -703,6 +754,104 @@ export default function Home() {
         setSubmitting(false);
       }
     })();
+  }
+
+  /* ─── Profile ─── */
+
+  async function loadProfile() {
+    setProfileLoading(true);
+    try {
+      const data = await api<ProfileData>(`/api/users/me/profile`);
+      setProfileData(data);
+    } catch { /* ignore */ }
+    finally { setProfileLoading(false); }
+  }
+
+  function openProfile() {
+    setProfileOpen(true);
+    setProfileTab("readings");
+    setEditingName(false);
+    void loadProfile();
+  }
+
+  function onSelectPreset(preset: string) {
+    if (!profileData) return;
+    const newPreset = profileData.profile.avatarPreset === preset ? null : preset;
+    // Optimistic update
+    setProfileData((prev) => prev ? {
+      ...prev,
+      profile: { ...prev.profile, avatarPreset: newPreset, avatarImage: null },
+    } : prev);
+    void api(`/api/users/me/profile`, {
+      method: "PUT",
+      body: JSON.stringify({ avatarPreset: newPreset }),
+    }).catch(() => void loadProfile());
+  }
+
+  function onUploadAvatar(e: React.ChangeEvent<HTMLInputElement>) {
+    const file = e.target.files?.[0];
+    if (!file) return;
+    const canvas = document.createElement("canvas");
+    canvas.width = 128;
+    canvas.height = 128;
+    const ctx = canvas.getContext("2d")!;
+    const img = new Image();
+    img.onload = () => {
+      const size = Math.min(img.width, img.height);
+      const sx = (img.width - size) / 2;
+      const sy = (img.height - size) / 2;
+      ctx.drawImage(img, sx, sy, size, size, 0, 0, 128, 128);
+      const dataUrl = canvas.toDataURL("image/jpeg", 0.8);
+      // Optimistic update
+      setProfileData((prev) => prev ? {
+        ...prev,
+        profile: { ...prev.profile, avatarImage: dataUrl, avatarPreset: null },
+      } : prev);
+      void api(`/api/users/me/profile`, {
+        method: "PUT",
+        body: JSON.stringify({ avatarImage: dataUrl }),
+      }).catch(() => void loadProfile());
+    };
+    img.src = URL.createObjectURL(file);
+    e.target.value = "";
+  }
+
+  function onSaveProfileName() {
+    if (!profileNameDraft.trim() || !profileData) return;
+    const newName = profileNameDraft.trim();
+    setProfileData((prev) => prev ? {
+      ...prev,
+      profile: { ...prev.profile, name: newName },
+    } : prev);
+    setEditingName(false);
+    void api(`/api/users/me/profile`, {
+      method: "PUT",
+      body: JSON.stringify({ name: newName }),
+    }).then(() => void refreshData()).catch(() => void loadProfile());
+  }
+
+  function renderProfileAvatar(size: "large" | "small") {
+    const p = profileData?.profile;
+    const cls = size === "large" ? "profile-avatar-large" : "avatar";
+    if (p?.avatarImage) {
+      return (
+        <span className={cls} style={{ background: colorFor(selectedUserId) }}>
+          <img src={p.avatarImage} alt="" />
+        </span>
+      );
+    }
+    if (p?.avatarPreset && PRESET_SVGS[p.avatarPreset]) {
+      return (
+        <span className={cls} style={{ background: colorFor(selectedUserId) }}>
+          {PRESET_SVGS[p.avatarPreset]}
+        </span>
+      );
+    }
+    return (
+      <span className={cls} style={{ background: colorFor(selectedUserId) }}>
+        {getAvatar(p?.name ?? session?.user?.name ?? "?")}
+      </span>
+    );
   }
 
   /* ─── Auth ─── */
@@ -1113,15 +1262,24 @@ export default function Home() {
         {/* Signed-in user */}
         <div className="drawer-section">
           <div className="drawer-label">Signed in as</div>
-          <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
-            <span className="avatar" style={{ background: colorFor(selectedUserId) }}>
-              {getAvatar(selectedUser?.name ?? "?")}
+          <button
+            type="button"
+            onClick={() => { setDrawerOpen(false); openProfile(); }}
+            style={{ display: "flex", alignItems: "center", gap: 10, cursor: "pointer", background: "none", border: "none", padding: 0, width: "100%", textAlign: "left" }}
+          >
+            <span className="avatar" style={{ background: colorFor(selectedUserId), overflow: "hidden" }}>
+              {profileData?.profile.avatarImage
+                ? <img src={profileData.profile.avatarImage} alt="" style={{ width: "100%", height: "100%", objectFit: "cover" }} />
+                : profileData?.profile.avatarPreset && PRESET_SVGS[profileData.profile.avatarPreset]
+                  ? <span style={{ display: "flex", alignItems: "center", justifyContent: "center", width: 18, height: 18 }}>{PRESET_SVGS[profileData.profile.avatarPreset]}</span>
+                  : getAvatar(selectedUser?.name ?? "?")}
             </span>
-            <div>
-              <div style={{ fontWeight: 500 }}>{session?.user?.name ?? "Unknown"}</div>
+            <div style={{ flex: 1, minWidth: 0 }}>
+              <div style={{ fontWeight: 500 }}>{profileData?.profile.name ?? session?.user?.name ?? "Unknown"}</div>
               <div className="text-tertiary" style={{ fontSize: 12 }}>{session?.user?.email ?? ""}</div>
             </div>
-          </div>
+            <svg viewBox="0 0 24 24" style={{ width: 16, height: 16, stroke: "var(--text-tertiary)", fill: "none", strokeWidth: 2, strokeLinecap: "round", strokeLinejoin: "round", flexShrink: 0 }}><polyline points="9,18 15,12 9,6" /></svg>
+          </button>
           <button
             className="btn btn-sm"
             style={{ marginTop: 12, width: "100%" }}
@@ -1134,17 +1292,26 @@ export default function Home() {
 
         {/* Group switcher */}
         <div className="drawer-section">
-          <div className="drawer-label">Group</div>
+          <div className="drawer-label">Groups</div>
           {userGroups.length > 0 ? (
-            <select
-              className="drawer-select"
-              value={groupId}
-              onChange={(e) => { onChangeGroup(e.target.value); }}
-            >
-              {userGroups.map((g) => (
-                <option key={g.id} value={g.id}>{g.name}</option>
+            <div className="group-list">
+              {userGroups.slice(0, 5).map((g) => (
+                <button
+                  key={g.id}
+                  type="button"
+                  className={`group-list-item ${g.id === groupId ? "active" : ""}`}
+                  onClick={() => { onChangeGroup(g.id); setDrawerOpen(false); }}
+                >
+                  <span className="group-list-item-name">{g.name}</span>
+                  <span className="group-list-item-role">{g.role}</span>
+                  {g.id === groupId && (
+                    <span className="group-list-check">
+                      <svg viewBox="0 0 24 24"><polyline points="20,6 9,17 4,12" /></svg>
+                    </span>
+                  )}
+                </button>
               ))}
-            </select>
+            </div>
           ) : (
             <div className="text-tertiary" style={{ fontSize: 13 }}>No groups yet</div>
           )}
@@ -1661,12 +1828,16 @@ export default function Home() {
                             {bibleText.verses.map((v) => {
                               const anns = verseAnnotationMap[v.verse];
                               const isHighlighted = anns && anns.length > 0;
+                              const isSelecting = selectedVerses &&
+                                v.verse >= selectedVerses.start &&
+                                v.verse <= selectedVerses.end &&
+                                bottomSheetOpen && bottomSheetMode === "new";
                               const highlightColor = isHighlighted ? colorFor(anns[0].authorId) : undefined;
                               return (
                                 <span
                                   key={v.verse}
                                   data-verse={v.verse}
-                                  className={`bible-verse${isHighlighted ? " verse-highlighted" : ""}`}
+                                  className={`bible-verse${isHighlighted ? " verse-highlighted" : ""}${isSelecting ? " verse-selecting" : ""}`}
                                   style={isHighlighted ? { "--hl-color": highlightColor } as React.CSSProperties : undefined}
                                   onClick={isHighlighted ? (e) => {
                                     e.stopPropagation();
@@ -2010,10 +2181,159 @@ export default function Home() {
           </>
         )}
 
-        <div className="text-tertiary" style={{ fontSize: 11, textAlign: "center", paddingTop: 8 }}>
-          Signed in as {session?.user?.name ?? "Unknown"}
-        </div>
+        <button
+          type="button"
+          className="text-tertiary"
+          onClick={openProfile}
+          style={{ fontSize: 11, textAlign: "center", paddingTop: 8, cursor: "pointer", background: "none", border: "none", width: "100%", color: "inherit" }}
+        >
+          Signed in as {profileData?.profile.name ?? session?.user?.name ?? "Unknown"}
+        </button>
       </main>
+
+      {/* ── Profile Panel ── */}
+      {profileOpen && (
+        <div className="profile-overlay">
+          <div className="profile-header">
+            <div className="profile-header-title">Profile</div>
+            <button className="icon-btn" onClick={() => setProfileOpen(false)} type="button">
+              <IconX />
+            </button>
+          </div>
+
+          {profileLoading && !profileData ? (
+            <div className="profile-body">
+              <div className="text-tertiary" style={{ textAlign: "center", padding: 40 }}>Loading...</div>
+            </div>
+          ) : profileData ? (
+            <div className="profile-body">
+              {/* Avatar */}
+              <div className="profile-avatar-section">
+                {renderProfileAvatar("large")}
+                <button className="btn btn-sm profile-upload-btn" type="button">
+                  <IconCamera /> Upload Photo
+                  <input type="file" accept="image/*" onChange={onUploadAvatar} />
+                </button>
+              </div>
+
+              {/* Preset grid */}
+              <div>
+                <div className="drawer-label">Choose an Avatar</div>
+                <div className="profile-preset-grid">
+                  {Object.entries(PRESET_SVGS).map(([key, svg]) => (
+                    <button
+                      key={key}
+                      type="button"
+                      className={`profile-preset-btn ${profileData.profile.avatarPreset === key ? "selected" : ""}`}
+                      onClick={() => onSelectPreset(key)}
+                      title={PRESET_NAMES[key]}
+                    >
+                      {svg}
+                    </button>
+                  ))}
+                </div>
+              </div>
+
+              {/* Display name */}
+              <div>
+                <div className="drawer-label">Display Name</div>
+                {!editingName ? (
+                  <div className="row-between">
+                    <span style={{ fontSize: 15, fontWeight: 500 }}>{profileData.profile.name}</span>
+                    <button
+                      className="btn btn-sm"
+                      onClick={() => { setEditingName(true); setProfileNameDraft(profileData.profile.name); }}
+                      type="button"
+                    >
+                      Edit
+                    </button>
+                  </div>
+                ) : (
+                  <div className="profile-name-form">
+                    <input
+                      className="input"
+                      value={profileNameDraft}
+                      onChange={(e) => setProfileNameDraft(e.target.value.slice(0, 60))}
+                      maxLength={60}
+                      autoFocus
+                      onKeyDown={(e) => { if (e.key === "Enter") onSaveProfileName(); }}
+                    />
+                    <button className="btn btn-gold btn-sm" onClick={onSaveProfileName} type="button" disabled={!profileNameDraft.trim()}>
+                      Save
+                    </button>
+                    <button className="btn btn-sm" onClick={() => setEditingName(false)} type="button">
+                      Cancel
+                    </button>
+                  </div>
+                )}
+                <div className="text-tertiary" style={{ fontSize: 12, marginTop: 6 }}>
+                  {profileData.profile.email} &middot; Joined {toDateLabel(profileData.profile.createdAt)}
+                </div>
+              </div>
+
+              {/* Tabs */}
+              <div className="profile-tabs">
+                <button
+                  type="button"
+                  className={`profile-tab ${profileTab === "readings" ? "active" : ""}`}
+                  onClick={() => setProfileTab("readings")}
+                >
+                  Reading Stats
+                </button>
+                <button
+                  type="button"
+                  className={`profile-tab ${profileTab === "comments" ? "active" : ""}`}
+                  onClick={() => setProfileTab("comments")}
+                >
+                  My Comments
+                </button>
+              </div>
+
+              {/* Tab content */}
+              {profileTab === "readings" && (
+                <div>
+                  <div style={{ fontSize: 13, marginBottom: 12 }}>
+                    <span style={{ fontWeight: 600, color: "var(--gold)", fontSize: 24, fontFamily: "var(--font-display)" }}>
+                      {profileData.readHistory.totalRead}
+                    </span>
+                    <span className="text-secondary" style={{ marginLeft: 8 }}>passages read</span>
+                  </div>
+                  {profileData.readHistory.items.length === 0 ? (
+                    <div className="text-tertiary" style={{ textAlign: "center", padding: 20 }}>No readings marked yet.</div>
+                  ) : (
+                    profileData.readHistory.items.map((item, i) => (
+                      <div key={i} className="profile-stat-row">
+                        <div style={{ flex: 1 }}>
+                          <div className="profile-stat-ref">{item.reference}</div>
+                          <div className="profile-stat-meta">{item.groupName} &middot; {toDateLabel(item.startDate)}</div>
+                        </div>
+                      </div>
+                    ))
+                  )}
+                </div>
+              )}
+
+              {profileTab === "comments" && (
+                <div>
+                  {profileData.commentHistory.length === 0 ? (
+                    <div className="text-tertiary" style={{ textAlign: "center", padding: 20 }}>No comments yet.</div>
+                  ) : (
+                    profileData.commentHistory.map((item) => (
+                      <div key={item.id} className="profile-comment-item">
+                        <div className="profile-comment-text">{item.text}</div>
+                        <div className="profile-comment-meta">
+                          {item.source === "comment" ? "Discussion" : item.source === "annotation" ? "Highlight" : item.source === "proposal_comment" ? "Proposal" : "Reply"}
+                          {" on "}{item.context} &middot; {relativeTime(item.createdAt)}
+                        </div>
+                      </div>
+                    ))
+                  )}
+                </div>
+              )}
+            </div>
+          ) : null}
+        </div>
+      )}
 
       {/* ── Annotation Bottom Sheet ── */}
       {bottomSheetOpen && (
