@@ -219,6 +219,30 @@ BEGIN
 END
 $$;
 
+-- Verse annotations (highlights with comments)
+CREATE TABLE IF NOT EXISTS annotations (
+  id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  reading_item_id UUID NOT NULL REFERENCES reading_items(id) ON DELETE CASCADE,
+  author_id UUID NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+  start_verse INT NOT NULL,
+  end_verse INT NOT NULL,
+  text VARCHAR(500) NOT NULL,
+  created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+  deleted_at TIMESTAMPTZ
+);
+
+CREATE TABLE IF NOT EXISTS annotation_replies (
+  id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  annotation_id UUID NOT NULL REFERENCES annotations(id) ON DELETE CASCADE,
+  author_id UUID NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+  text VARCHAR(500) NOT NULL,
+  created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+  deleted_at TIMESTAMPTZ
+);
+
+CREATE INDEX IF NOT EXISTS idx_annotations_reading_item ON annotations(reading_item_id);
+CREATE INDEX IF NOT EXISTS idx_annotation_replies_annotation ON annotation_replies(annotation_id);
+
 -- Google OAuth: stable account linking via Google sub ID
 DO $$
 BEGIN

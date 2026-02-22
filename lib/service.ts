@@ -1719,3 +1719,173 @@ export async function runWeeklyRollover(params?: { groupId?: string }) {
     failures: failed,
   };
 }
+
+/* ─── Verse Annotations ─── */
+
+async function requireReadingAccess(
+  readingItemId: string,
+  userId: string,
+): Promise<{ groupId: string }> {
+  const access = await dbQueryOne<{ group_id: string }>(
+    `SELECT w.group_id
+     FROM reading_items ri
+     JOIN weeks w ON w.id = ri.week_id
+     JOIN group_members gm ON gm.group_id = w.group_id
+     WHERE ri.id = $1
+       AND gm.user_id = $2`,
+    [readingItemId, userId],
+  );
+  if (!access) throw new ServiceError("Reading item not found or access denied", 404);
+  return { groupId: access.group_id };
+}
+
+export async function getAnnotations(readingItemId: string, userId: string) {
+  await requireReadingAccess(readingItemId, userId);
+
+  const annotations = await dbQuery<{
+    id: string;
+    author_id: string;
+    author_name: string;
+    start_verse: number;
+    end_verse: number;
+    text: string;
+    created_at: string;
+  }>(
+    `SELECT a.id, a.author_id, u.name AS author_name,
+            a.start_verse, a.end_verse, a.text, a.created_at::text
+     FROM annotations a
+     JOIN users u ON u.id = a.author_id
+     WHERE a.reading_item_id = $1
+       AND a.deleted_at IS NULL
+     ORDER BY a.start_verse ASC, a.created_at ASC`,
+    [readingItemId],
+  );
+
+  const annotationIds = annotations.map((a) => a.id);
+  const replies = annotationIds.length > 0
+    ? await dbQuery<{
+        id: string;
+        annotation_id: string;
+        author_id: string;
+        author_name: string;
+        text: string;
+        created_at: string;
+      }>(
+        `SELECT ar.id, ar.annotation_id, ar.author_id, u.name AS author_name,
+                ar.text, ar.created_at::text
+         FROM annotation_replies ar
+         JOIN users u ON u.id = ar.author_id
+         WHERE ar.annotation_id = ANY($1::uuid[])
+           AND ar.deleted_at IS NULL
+         ORDER BY ar.created_at ASC`,
+        [annotationIds],
+      )
+    : [];
+
+  return annotations.map((a) => ({
+    id: a.id,
+    authorId: a.author_id,
+    authorName: a.author_name,
+    startVerse: a.start_verse,
+    endVerse: a.end_verse,
+    text: a.text,
+    createdAt: a.created_at,
+    canDelete: a.author_id === userId,
+    replies: replies
+      .filter((r) => r.annotation_id === a.id)
+      .map((r) => ({
+        id: r.id,
+        authorId: r.author_id,
+        authorName: r.author_name,
+        text: r.text,
+        createdAt: r.created_at,
+        canDelete: r.author_id === userId,
+      })),
+  }));
+}
+
+export async function createAnnotation(params: {
+  readingItemId: string;
+  userId: string;
+  startVerse: number;
+  endVerse: number;
+  text: string;
+}) {
+  const text = params.text.trim();
+  if (!text) throw new ServiceError("Comment cannot be empty", 422);
+  if (text.length > 500) throw new ServiceError("Comment exceeds 500 characters", 422);
+  if (params.startVerse < 1 || params.endVerse < params.startVerse) {
+    throw new ServiceError("Invalid verse range", 422);
+  }
+
+  await requireReadingAccess(params.readingItemId, params.userId);
+
+  const annotation = await dbQueryOne<{ id: string }>(
+    `INSERT INTO annotations(reading_item_id, author_id, start_verse, end_verse, text)
+     VALUES ($1, $2, $3, $4, $5)
+     RETURNING id`,
+    [params.readingItemId, params.userId, params.startVerse, params.endVerse, text],
+  );
+
+  return { annotationId: annotation?.id ?? null };
+}
+
+export async function createAnnotationReply(params: {
+  annotationId: string;
+  userId: string;
+  text: string;
+}) {
+  const text = params.text.trim();
+  if (!text) throw new ServiceError("Reply cannot be empty", 422);
+  if (text.length > 500) throw new ServiceError("Reply exceeds 500 characters", 422);
+
+  const annotation = await dbQueryOne<{ id: string; reading_item_id: string }>(
+    `SELECT a.id, a.reading_item_id
+     FROM annotations a
+     WHERE a.id = $1
+       AND a.deleted_at IS NULL`,
+    [params.annotationId],
+  );
+
+  if (!annotation) throw new ServiceError("Annotation not found", 404);
+  await requireReadingAccess(annotation.reading_item_id, params.userId);
+
+  const reply = await dbQueryOne<{ id: string }>(
+    `INSERT INTO annotation_replies(annotation_id, author_id, text)
+     VALUES ($1, $2, $3)
+     RETURNING id`,
+    [params.annotationId, params.userId, text],
+  );
+
+  return { replyId: reply?.id ?? null };
+}
+
+export async function deleteAnnotation(params: { annotationId: string; userId: string }) {
+  const annotation = await dbQueryOne<{ author_id: string; deleted_at: string | null }>(
+    `SELECT author_id, deleted_at::text FROM annotations WHERE id = $1`,
+    [params.annotationId],
+  );
+
+  if (!annotation || annotation.deleted_at) throw new ServiceError("Annotation not found", 404);
+  if (annotation.author_id !== params.userId) {
+    throw new ServiceError("Only the author can delete this annotation", 403);
+  }
+
+  await dbQuery(`UPDATE annotations SET deleted_at = NOW() WHERE id = $1`, [params.annotationId]);
+  return { ok: true };
+}
+
+export async function deleteAnnotationReply(params: { replyId: string; userId: string }) {
+  const reply = await dbQueryOne<{ author_id: string; deleted_at: string | null }>(
+    `SELECT author_id, deleted_at::text FROM annotation_replies WHERE id = $1`,
+    [params.replyId],
+  );
+
+  if (!reply || reply.deleted_at) throw new ServiceError("Reply not found", 404);
+  if (reply.author_id !== params.userId) {
+    throw new ServiceError("Only the author can delete this reply", 403);
+  }
+
+  await dbQuery(`UPDATE annotation_replies SET deleted_at = NOW() WHERE id = $1`, [params.replyId]);
+  return { ok: true };
+}

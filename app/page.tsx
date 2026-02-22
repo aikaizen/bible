@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { signIn, signOut, useSession } from "next-auth/react";
 import { isValidReference } from "@/lib/reference";
 
@@ -128,6 +128,18 @@ type BibleText = {
   verses: BibleVerse[];
   text: string;
   translation: string;
+};
+
+type AnnotationReply = {
+  id: string; authorId: string; authorName: string;
+  text: string; createdAt: string; canDelete: boolean;
+};
+
+type Annotation = {
+  id: string; authorId: string; authorName: string;
+  startVerse: number; endVerse: number;
+  text: string; createdAt: string; canDelete: boolean;
+  replies: AnnotationReply[];
 };
 
 /* ─── Icons (inline SVG) ─── */
@@ -265,6 +277,16 @@ export default function Home() {
   const [previewTexts, setPreviewTexts] = useState<Record<string, BibleText | null>>({});
   const [previewLoading, setPreviewLoading] = useState<Record<string, boolean>>({});
 
+  // Annotations (verse highlights)
+  const [annotations, setAnnotations] = useState<Annotation[]>([]);
+  const [selectedVerses, setSelectedVerses] = useState<{ start: number; end: number } | null>(null);
+  const [activeAnnotation, setActiveAnnotation] = useState<Annotation | null>(null);
+  const [annotationText, setAnnotationText] = useState("");
+  const [annotationReplyText, setAnnotationReplyText] = useState("");
+  const [bottomSheetOpen, setBottomSheetOpen] = useState(false);
+  const [bottomSheetMode, setBottomSheetMode] = useState<"new" | "view">("new");
+  const versesRef = useRef<HTMLDivElement>(null);
+
   // Settings
   const [showSettings, setShowSettings] = useState(false);
 
@@ -295,6 +317,18 @@ export default function Home() {
   }, [selectedUserId, snapshot]);
 
   const isAdmin = snapshot?.myRole === "OWNER" || snapshot?.myRole === "ADMIN";
+
+  // Build a map of verse -> annotations for highlight rendering
+  const verseAnnotationMap = useMemo(() => {
+    const map: Record<number, Annotation[]> = {};
+    for (const ann of annotations) {
+      for (let v = ann.startVerse; v <= ann.endVerse; v++) {
+        if (!map[v]) map[v] = [];
+        map[v].push(ann);
+      }
+    }
+    return map;
+  }, [annotations]);
 
   /* ─── Data loading ─── */
 
@@ -353,15 +387,20 @@ export default function Home() {
     setInviteToken(payload.group.inviteToken ?? "");
 
     if (payload.readingItem) {
-      const [c] = await Promise.all([
+      const [c, a] = await Promise.all([
         api<{ comments: Comment[] }>(
           `/api/reading-items/${payload.readingItem.id}/comments`,
+        ),
+        api<{ annotations: Annotation[] }>(
+          `/api/reading-items/${payload.readingItem.id}/annotations`,
         ),
         loadBibleText(payload.readingItem.reference),
       ]);
       setComments(c.comments);
+      setAnnotations(a.annotations);
     } else {
       setComments([]);
+      setAnnotations([]);
       setBibleText(null);
     }
 
@@ -432,6 +471,160 @@ export default function Home() {
     window.localStorage.setItem(key, newComment);
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [newComment, selectedUserId, snapshot?.readingItem?.id]);
+
+  /* ─── Verse selection detection ─── */
+
+  const handleVerseSelection = useCallback(() => {
+    if (bottomSheetOpen && bottomSheetMode === "view") return;
+    const sel = window.getSelection();
+    if (!sel || sel.isCollapsed || !sel.rangeCount) return;
+
+    const range = sel.getRangeAt(0);
+    const container = versesRef.current;
+    if (!container || !container.contains(range.commonAncestorContainer)) return;
+
+    // Find verse spans in the selection
+    const verseSpans = container.querySelectorAll<HTMLSpanElement>("[data-verse]");
+    let startVerse: number | null = null;
+    let endVerse: number | null = null;
+
+    for (const span of verseSpans) {
+      if (sel.containsNode(span, true)) {
+        const v = parseInt(span.dataset.verse!, 10);
+        if (startVerse === null || v < startVerse) startVerse = v;
+        if (endVerse === null || v > endVerse) endVerse = v;
+      }
+    }
+
+    if (startVerse !== null && endVerse !== null) {
+      setSelectedVerses({ start: startVerse, end: endVerse });
+      setBottomSheetMode("new");
+      setAnnotationText("");
+      setBottomSheetOpen(true);
+      sel.removeAllRanges();
+    }
+  }, [bottomSheetOpen, bottomSheetMode]);
+
+  useEffect(() => {
+    const onMouseUp = () => setTimeout(handleVerseSelection, 10);
+    document.addEventListener("mouseup", onMouseUp);
+    document.addEventListener("touchend", onMouseUp);
+    return () => {
+      document.removeEventListener("mouseup", onMouseUp);
+      document.removeEventListener("touchend", onMouseUp);
+    };
+  }, [handleVerseSelection]);
+
+  function closeBottomSheet() {
+    setBottomSheetOpen(false);
+    setActiveAnnotation(null);
+    setSelectedVerses(null);
+    setAnnotationText("");
+    setAnnotationReplyText("");
+  }
+
+  function onClickHighlight(ann: Annotation) {
+    setActiveAnnotation(ann);
+    setBottomSheetMode("view");
+    setAnnotationReplyText("");
+    setBottomSheetOpen(true);
+  }
+
+  async function loadAnnotations() {
+    if (!snapshot?.readingItem) return;
+    try {
+      const a = await api<{ annotations: Annotation[] }>(
+        `/api/reading-items/${snapshot.readingItem.id}/annotations`,
+      );
+      setAnnotations(a.annotations);
+    } catch { /* ignore */ }
+  }
+
+  function onCreateAnnotation() {
+    if (!selectedVerses || !annotationText.trim() || !snapshot?.readingItem) return;
+    void (async () => {
+      try {
+        setSubmitting(true);
+        await api(`/api/reading-items/${snapshot.readingItem!.id}/annotations`, {
+          method: "POST",
+          body: JSON.stringify({
+            startVerse: selectedVerses.start,
+            endVerse: selectedVerses.end,
+            text: annotationText.trim(),
+          }),
+        });
+        closeBottomSheet();
+        await loadAnnotations();
+      } catch (err) {
+        setError(err instanceof Error ? err.message : "Failed to create annotation");
+      } finally {
+        setSubmitting(false);
+      }
+    })();
+  }
+
+  function onCreateAnnotationReply() {
+    if (!activeAnnotation || !annotationReplyText.trim()) return;
+    void (async () => {
+      try {
+        setSubmitting(true);
+        await api(`/api/annotations/${activeAnnotation.id}/replies`, {
+          method: "POST",
+          body: JSON.stringify({ text: annotationReplyText.trim() }),
+        });
+        setAnnotationReplyText("");
+        await loadAnnotations();
+        // Refresh the active annotation
+        const updated = await api<{ annotations: Annotation[] }>(
+          `/api/reading-items/${snapshot!.readingItem!.id}/annotations`,
+        );
+        setAnnotations(updated.annotations);
+        const refreshed = updated.annotations.find((a) => a.id === activeAnnotation.id);
+        if (refreshed) setActiveAnnotation(refreshed);
+      } catch (err) {
+        setError(err instanceof Error ? err.message : "Failed to post reply");
+      } finally {
+        setSubmitting(false);
+      }
+    })();
+  }
+
+  function onDeleteAnnotation(annotationId: string) {
+    void (async () => {
+      try {
+        setSubmitting(true);
+        await api(`/api/annotations/${annotationId}`, { method: "DELETE" });
+        closeBottomSheet();
+        await loadAnnotations();
+      } catch (err) {
+        setError(err instanceof Error ? err.message : "Failed to delete");
+      } finally {
+        setSubmitting(false);
+      }
+    })();
+  }
+
+  function onDeleteAnnotationReply(replyId: string) {
+    void (async () => {
+      try {
+        setSubmitting(true);
+        await api(`/api/annotation-replies/${replyId}`, { method: "DELETE" });
+        await loadAnnotations();
+        if (activeAnnotation) {
+          const updated = await api<{ annotations: Annotation[] }>(
+            `/api/reading-items/${snapshot!.readingItem!.id}/annotations`,
+          );
+          setAnnotations(updated.annotations);
+          const refreshed = updated.annotations.find((a) => a.id === activeAnnotation.id);
+          if (refreshed) setActiveAnnotation(refreshed);
+        }
+      } catch (err) {
+        setError(err instanceof Error ? err.message : "Failed to delete reply");
+      } finally {
+        setSubmitting(false);
+      }
+    })();
+  }
 
   /* ─── Auth ─── */
 
@@ -1344,14 +1537,33 @@ export default function Home() {
                       {bibleText && bibleText.verses.length > 0 && (
                         <div className="bible-text-container">
                           <div className="bible-translation">{bibleText.translation}</div>
-                          <div className="bible-verses">
-                            {bibleText.verses.map((v) => (
-                              <span key={v.verse} className="bible-verse">
-                                <sup className="verse-num">{v.verse}</sup>
-                                {v.text}{" "}
-                              </span>
-                            ))}
+                          <div className="bible-verses" ref={versesRef}>
+                            {bibleText.verses.map((v) => {
+                              const anns = verseAnnotationMap[v.verse];
+                              const isHighlighted = anns && anns.length > 0;
+                              const highlightColor = isHighlighted ? colorFor(anns[0].authorId) : undefined;
+                              return (
+                                <span
+                                  key={v.verse}
+                                  data-verse={v.verse}
+                                  className={`bible-verse${isHighlighted ? " verse-highlighted" : ""}`}
+                                  style={isHighlighted ? { "--hl-color": highlightColor } as React.CSSProperties : undefined}
+                                  onClick={isHighlighted ? (e) => {
+                                    e.stopPropagation();
+                                    onClickHighlight(anns[0]);
+                                  } : undefined}
+                                >
+                                  <sup className="verse-num">{v.verse}</sup>
+                                  {v.text}{" "}
+                                </span>
+                              );
+                            })}
                           </div>
+                          {annotations.length > 0 && (
+                            <div className="annotation-hint">
+                              {annotations.length} highlight{annotations.length !== 1 ? "s" : ""} in this passage
+                            </div>
+                          )}
                         </div>
                       )}
                       {!bibleLoading && bibleText === null && (
@@ -1682,6 +1894,145 @@ export default function Home() {
           Signed in as {session?.user?.name ?? "Unknown"}
         </div>
       </main>
+
+      {/* ── Annotation Bottom Sheet ── */}
+      {bottomSheetOpen && (
+        <>
+          <div className="sheet-backdrop" onClick={closeBottomSheet} />
+          <div className="sheet">
+            <div className="sheet-handle" />
+
+            {bottomSheetMode === "new" && selectedVerses && (
+              <div className="sheet-content">
+                <div className="sheet-header">
+                  <div className="sheet-title">
+                    Comment on {selectedVerses.start === selectedVerses.end
+                      ? `verse ${selectedVerses.start}`
+                      : `verses ${selectedVerses.start}\u2013${selectedVerses.end}`}
+                  </div>
+                  <button className="icon-btn" onClick={closeBottomSheet} type="button">
+                    <IconX />
+                  </button>
+                </div>
+                <textarea
+                  className="textarea"
+                  value={annotationText}
+                  onChange={(e) => setAnnotationText(e.target.value.slice(0, 500))}
+                  placeholder="Share your thoughts on this passage..."
+                  maxLength={500}
+                  autoFocus
+                  style={{ minHeight: 80 }}
+                />
+                <div className="row-between">
+                  <span className="text-tertiary" style={{ fontSize: 11 }}>{annotationText.length}/500</span>
+                  <button
+                    className="btn btn-gold"
+                    onClick={onCreateAnnotation}
+                    disabled={submitting || !annotationText.trim()}
+                    type="button"
+                  >
+                    Highlight &amp; Comment
+                  </button>
+                </div>
+              </div>
+            )}
+
+            {bottomSheetMode === "view" && activeAnnotation && (
+              <div className="sheet-content">
+                <div className="sheet-header">
+                  <div className="sheet-title">
+                    {activeAnnotation.startVerse === activeAnnotation.endVerse
+                      ? `Verse ${activeAnnotation.startVerse}`
+                      : `Verses ${activeAnnotation.startVerse}\u2013${activeAnnotation.endVerse}`}
+                  </div>
+                  <button className="icon-btn" onClick={closeBottomSheet} type="button">
+                    <IconX />
+                  </button>
+                </div>
+
+                {/* Original annotation */}
+                <div className="sheet-annotation">
+                  <div className="sheet-annotation-header">
+                    <span className="avatar avatar-sm" style={{ background: colorFor(activeAnnotation.authorId) }}>
+                      {getAvatar(activeAnnotation.authorName)}
+                    </span>
+                    <div>
+                      <div className="sheet-annotation-author">{activeAnnotation.authorName}</div>
+                      <div className="sheet-annotation-time">{relativeTime(activeAnnotation.createdAt)}</div>
+                    </div>
+                    {activeAnnotation.canDelete && (
+                      <button
+                        className="btn-link"
+                        style={{ marginLeft: "auto" }}
+                        onClick={() => onDeleteAnnotation(activeAnnotation.id)}
+                        type="button"
+                      >
+                        Delete
+                      </button>
+                    )}
+                  </div>
+                  <div className="sheet-annotation-text">{activeAnnotation.text}</div>
+                </div>
+
+                {/* Replies */}
+                {activeAnnotation.replies.length > 0 && (
+                  <div className="sheet-replies">
+                    {activeAnnotation.replies.map((r) => (
+                      <div key={r.id} className="sheet-reply">
+                        <div className="sheet-annotation-header">
+                          <span className="avatar avatar-sm" style={{ background: colorFor(r.authorId) }}>
+                            {getAvatar(r.authorName)}
+                          </span>
+                          <div>
+                            <div className="sheet-annotation-author">{r.authorName}</div>
+                            <div className="sheet-annotation-time">{relativeTime(r.createdAt)}</div>
+                          </div>
+                          {r.canDelete && (
+                            <button
+                              className="btn-link"
+                              style={{ marginLeft: "auto" }}
+                              onClick={() => onDeleteAnnotationReply(r.id)}
+                              type="button"
+                            >
+                              Delete
+                            </button>
+                          )}
+                        </div>
+                        <div className="sheet-reply-text">{r.text}</div>
+                      </div>
+                    ))}
+                  </div>
+                )}
+
+                {/* Reply input */}
+                <div className="sheet-reply-input">
+                  <input
+                    className="input"
+                    value={annotationReplyText}
+                    onChange={(e) => setAnnotationReplyText(e.target.value.slice(0, 500))}
+                    placeholder="Add a reply..."
+                    maxLength={500}
+                    onKeyDown={(e) => {
+                      if (e.key === "Enter" && !e.shiftKey && annotationReplyText.trim()) {
+                        e.preventDefault();
+                        onCreateAnnotationReply();
+                      }
+                    }}
+                  />
+                  <button
+                    className="btn btn-gold btn-sm"
+                    onClick={onCreateAnnotationReply}
+                    disabled={submitting || !annotationReplyText.trim()}
+                    type="button"
+                  >
+                    Reply
+                  </button>
+                </div>
+              </div>
+            )}
+          </div>
+        </>
+      )}
     </>
   );
 }
