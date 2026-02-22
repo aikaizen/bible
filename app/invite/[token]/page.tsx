@@ -75,7 +75,7 @@ export default function InvitePage({ params }: { params: Promise<{ token: string
     return (
       <div className="invite-page">
         <div className="invite-card">
-          <div className="invite-brand">Bible Vote</div>
+          <div className="invite-brand">Read the Bible Together</div>
           <div className="invite-loading">Loading invite...</div>
         </div>
       </div>
@@ -87,10 +87,10 @@ export default function InvitePage({ params }: { params: Promise<{ token: string
     return (
       <div className="invite-page">
         <div className="invite-card">
-          <div className="invite-brand">Bible Vote</div>
+          <div className="invite-brand">Read the Bible Together</div>
           <div className="invite-invalid">This invite link is invalid or has expired.</div>
           <Link href="/" className="btn btn-gold" style={{ marginTop: 16, display: "inline-block", textDecoration: "none" }}>
-            Go to Bible Vote
+            Go to App
           </Link>
         </div>
       </div>
@@ -102,9 +102,9 @@ export default function InvitePage({ params }: { params: Promise<{ token: string
     return (
       <div className="invite-page">
         <div className="invite-card">
-          <div className="invite-brand">Bible Vote</div>
+          <div className="invite-brand">Read the Bible Together</div>
           <div className="invite-message">
-            <strong>{info?.invitedBy}</strong> invited you to join
+            You have been invited to join your friend on a journey to read the Bible together.
           </div>
           <div className="invite-group-name">{info?.groupName}</div>
           {info?.recipientName && (
@@ -131,10 +131,10 @@ export default function InvitePage({ params }: { params: Promise<{ token: string
     return (
       <div className="invite-page">
         <div className="invite-card">
-          <div className="invite-brand">Bible Vote</div>
+          <div className="invite-brand">Read the Bible Together</div>
           <div className="invite-invalid">{error}</div>
           <Link href="/" className="btn btn-gold" style={{ marginTop: 16, display: "inline-block", textDecoration: "none" }}>
-            Go to Bible Vote
+            Go to App
           </Link>
         </div>
       </div>
@@ -144,7 +144,7 @@ export default function InvitePage({ params }: { params: Promise<{ token: string
   return (
     <div className="invite-page">
       <div className="invite-card">
-        <div className="invite-brand">Bible Vote</div>
+        <div className="invite-brand">Read the Bible Together</div>
         <div className="invite-message">Joining <strong>{info?.groupName}</strong>...</div>
         <div className="invite-loading">Please wait...</div>
       </div>

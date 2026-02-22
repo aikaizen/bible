@@ -89,6 +89,7 @@ type Snapshot = {
     id: string; reference: string; note: string; proposerId: string;
     proposerName: string; createdAt: string; voteCount: number; isSeed: boolean;
     voters: Array<{ id: string; name: string }>;
+    commentCount: number; unreadCount: number;
   }>;
   myRole: "OWNER" | "ADMIN" | "MEMBER";
   myVoteProposalId: string | null;
@@ -128,6 +129,11 @@ type BibleText = {
   verses: BibleVerse[];
   text: string;
   translation: string;
+};
+
+type ProposalComment = {
+  id: string; authorId: string; authorName: string;
+  text: string; createdAt: string; canDelete: boolean;
 };
 
 type AnnotationReply = {
@@ -272,10 +278,6 @@ export default function Home() {
   const [bookSuggestions, setBookSuggestions] = useState<string[]>([]);
   const autocompleteRef = useRef<HTMLDivElement>(null);
 
-  // Proposal previews (#13)
-  const [previewOpen, setPreviewOpen] = useState<Record<string, boolean>>({});
-  const [previewTexts, setPreviewTexts] = useState<Record<string, BibleText | null>>({});
-  const [previewLoading, setPreviewLoading] = useState<Record<string, boolean>>({});
 
   // Annotations (verse highlights)
   const [annotations, setAnnotations] = useState<Annotation[]>([]);
@@ -286,6 +288,12 @@ export default function Home() {
   const [bottomSheetOpen, setBottomSheetOpen] = useState(false);
   const [bottomSheetMode, setBottomSheetMode] = useState<"new" | "view">("new");
   const versesRef = useRef<HTMLDivElement>(null);
+
+  // Proposal comments
+  const [proposalCommentsOpen, setProposalCommentsOpen] = useState<Record<string, boolean>>({});
+  const [proposalComments, setProposalComments] = useState<Record<string, ProposalComment[]>>({});
+  const [proposalCommentDrafts, setProposalCommentDrafts] = useState<Record<string, string>>({});
+  const [proposalCommentsLoading, setProposalCommentsLoading] = useState<Record<string, boolean>>({});
 
   // Settings
   const [showSettings, setShowSettings] = useState(false);
@@ -317,6 +325,14 @@ export default function Home() {
   }, [selectedUserId, snapshot]);
 
   const isAdmin = snapshot?.myRole === "OWNER" || snapshot?.myRole === "ADMIN";
+
+  const topVotedProposalId = useMemo(() => {
+    if (!snapshot || snapshot.proposals.length === 0) return null;
+    const maxVotes = Math.max(...snapshot.proposals.map((p) => p.voteCount));
+    if (maxVotes <= 0) return null;
+    const topProposals = snapshot.proposals.filter((p) => p.voteCount === maxVotes);
+    return topProposals.length === 1 ? topProposals[0].id : null;
+  }, [snapshot]);
 
   // Build a map of verse -> annotations for highlight rendering
   const verseAnnotationMap = useMemo(() => {
@@ -360,25 +376,6 @@ export default function Home() {
     if (!current) return;
     const next = navigateChapter(current, delta);
     if (next) openInReader(next);
-  }
-
-  async function loadProposalPreview(proposalId: string, reference: string) {
-    if (previewTexts[proposalId] !== undefined) return;
-    setPreviewLoading((prev) => ({ ...prev, [proposalId]: true }));
-    try {
-      const data = await api<BibleText>(`/api/bible?reference=${encodeURIComponent(reference)}`);
-      setPreviewTexts((prev) => ({ ...prev, [proposalId]: data }));
-    } catch {
-      setPreviewTexts((prev) => ({ ...prev, [proposalId]: null }));
-    } finally {
-      setPreviewLoading((prev) => ({ ...prev, [proposalId]: false }));
-    }
-  }
-
-  function togglePreview(proposalId: string, reference: string) {
-    const isOpen = !previewOpen[proposalId];
-    setPreviewOpen((prev) => ({ ...prev, [proposalId]: isOpen }));
-    if (isOpen) loadProposalPreview(proposalId, reference);
   }
 
   async function loadSnapshot(gId: string) {
@@ -626,6 +623,88 @@ export default function Home() {
     })();
   }
 
+  /* ─── Proposal Comments ─── */
+
+  async function loadProposalComments(proposalId: string) {
+    setProposalCommentsLoading((prev) => ({ ...prev, [proposalId]: true }));
+    try {
+      const data = await api<{ comments: ProposalComment[] }>(`/api/proposals/${proposalId}/comments`);
+      setProposalComments((prev) => ({ ...prev, [proposalId]: data.comments }));
+      // Clear unread count in local state
+      setSnapshot((prev) => {
+        if (!prev) return prev;
+        return {
+          ...prev,
+          proposals: prev.proposals.map((p) =>
+            p.id === proposalId ? { ...p, unreadCount: 0 } : p,
+          ),
+        };
+      });
+    } catch { /* ignore */ }
+    finally {
+      setProposalCommentsLoading((prev) => ({ ...prev, [proposalId]: false }));
+    }
+  }
+
+  function toggleProposalComments(proposalId: string) {
+    const opening = !proposalCommentsOpen[proposalId];
+    setProposalCommentsOpen((prev) => ({ ...prev, [proposalId]: opening }));
+    if (opening) void loadProposalComments(proposalId);
+  }
+
+  function onCreateProposalComment(proposalId: string) {
+    const text = proposalCommentDrafts[proposalId] ?? "";
+    if (!text.trim()) return;
+    void (async () => {
+      try {
+        setSubmitting(true);
+        await api(`/api/proposals/${proposalId}/comments`, {
+          method: "POST",
+          body: JSON.stringify({ text: text.trim() }),
+        });
+        setProposalCommentDrafts((prev) => ({ ...prev, [proposalId]: "" }));
+        await loadProposalComments(proposalId);
+        // Increment comment count in snapshot
+        setSnapshot((prev) => {
+          if (!prev) return prev;
+          return {
+            ...prev,
+            proposals: prev.proposals.map((p) =>
+              p.id === proposalId ? { ...p, commentCount: p.commentCount + 1 } : p,
+            ),
+          };
+        });
+      } catch (err) {
+        setError(err instanceof Error ? err.message : "Failed to post comment");
+      } finally {
+        setSubmitting(false);
+      }
+    })();
+  }
+
+  function onDeleteProposalComment(commentId: string, proposalId: string) {
+    void (async () => {
+      try {
+        setSubmitting(true);
+        await api(`/api/proposal-comments/${commentId}`, { method: "DELETE" });
+        await loadProposalComments(proposalId);
+        setSnapshot((prev) => {
+          if (!prev) return prev;
+          return {
+            ...prev,
+            proposals: prev.proposals.map((p) =>
+              p.id === proposalId ? { ...p, commentCount: Math.max(0, p.commentCount - 1) } : p,
+            ),
+          };
+        });
+      } catch (err) {
+        setError(err instanceof Error ? err.message : "Failed to delete comment");
+      } finally {
+        setSubmitting(false);
+      }
+    })();
+  }
+
   /* ─── Auth ─── */
 
   function onSignOut() {
@@ -839,12 +918,12 @@ export default function Home() {
         setShowInviteForm(false);
 
         const inviteUrl = `${window.location.origin}/invite/${payload.token}`;
-        const shareText = `Hey${inviteName.trim() ? ` ${inviteName.trim()}` : ""}! Join my Bible reading group on Bible Vote: ${inviteUrl}`;
+        const shareText = `Hey${inviteName.trim() ? ` ${inviteName.trim()}` : ""}! Join me on a journey to read the Bible together: ${inviteUrl}`;
 
         // Try Web Share API first (mobile), then fall back to clipboard
         if (navigator.share) {
           try {
-            await navigator.share({ title: "Bible Vote Invite", text: shareText });
+            await navigator.share({ title: "Read the Bible Together", text: shareText });
           } catch {
             // User cancelled share — still copy to clipboard
             await navigator.clipboard.writeText(inviteUrl);
@@ -875,10 +954,10 @@ export default function Home() {
 
   function onShareInviteLink(token: string, recipientName: string) {
     const inviteUrl = `${window.location.origin}/invite/${token}`;
-    const shareText = `Hey ${recipientName}! Join my Bible reading group on Bible Vote: ${inviteUrl}`;
+    const shareText = `Hey ${recipientName}! Join me on a journey to read the Bible together: ${inviteUrl}`;
 
     if (navigator.share) {
-      void navigator.share({ title: "Bible Vote Invite", text: shareText }).catch(() => {
+      void navigator.share({ title: "Read the Bible Together", text: shareText }).catch(() => {
         void navigator.clipboard.writeText(inviteUrl);
       });
     } else {
@@ -924,7 +1003,7 @@ export default function Home() {
   if (sessionStatus === "loading" || (session && loading)) {
     return (
       <div className="loading-screen">
-        <span>Bible Vote</span>
+        <span>Read the Bible Together</span>
       </div>
     );
   }
@@ -940,9 +1019,9 @@ export default function Home() {
             onClick={() => setBrandTaps((n) => n + 1)}
             style={{ cursor: "default", userSelect: "none" }}
           >
-            Bible Vote
+            Read the Bible Together
           </div>
-          <div className="auth-subtitle">Vote on weekly Bible readings with your group</div>
+          <div className="auth-subtitle">Read the Bible together with your group</div>
           <button
             className="btn btn-gold auth-btn"
             onClick={() => void signIn("google")}
@@ -1003,7 +1082,7 @@ export default function Home() {
     <>
       {/* ── Top Bar ── */}
       <header className="topbar">
-        <div className="topbar-brand">Bible Vote</div>
+        <div className="topbar-brand">Read the Bible Together</div>
         <div className="topbar-group">{snapshot?.group.name ?? ""}</div>
         <div className="topbar-actions">
           <button className="icon-btn" onClick={() => void refreshData()} type="button" disabled={submitting}>
@@ -1286,12 +1365,13 @@ export default function Home() {
 
                 <div className="stack">
                   {snapshot.proposals.map((p) => (
-                    <div key={p.id} className={`proposal ${snapshot.myVoteProposalId === p.id ? "voted" : ""}`}>
+                    <div key={p.id} className={`proposal ${snapshot.myVoteProposalId === p.id ? "voted" : ""}${topVotedProposalId === p.id ? " top-voted" : ""}`}>
                       <div className="row-between" style={{ alignItems: "flex-start" }}>
                         <div>
                           <div className="proposal-ref">
                             {p.reference}
                             {p.isSeed && <span className="seed-badge"><IconSeed /> suggested</span>}
+                            {topVotedProposalId === p.id && <span className="top-badge">Top</span>}
                           </div>
                           {p.note && <div className="proposal-note">{p.note}</div>}
                           <div className="proposal-meta">
@@ -1319,10 +1399,19 @@ export default function Home() {
                         </button>
                         <button
                           className="btn btn-sm"
-                          onClick={() => togglePreview(p.id, p.reference)}
+                          onClick={() => openInReader(p.reference)}
                           type="button"
                         >
-                          {previewOpen[p.id] ? "Hide" : "Preview"}
+                          Read
+                        </button>
+                        <button
+                          className="btn btn-sm proposal-comment-btn"
+                          onClick={() => toggleProposalComments(p.id)}
+                          type="button"
+                        >
+                          Comments
+                          {p.commentCount > 0 && <span className="comment-count-inline">({p.commentCount})</span>}
+                          {p.unreadCount > 0 && <span className="unread-badge">{p.unreadCount}</span>}
                         </button>
                         {(isAdmin || p.proposerId === selectedUserId) && !p.isSeed && (
                           <button
@@ -1356,32 +1445,63 @@ export default function Home() {
                         )}
                       </div>
 
-                      {/* Passage preview */}
-                      {previewOpen[p.id] && (
-                        <div className="proposal-preview">
-                          {previewLoading[p.id] && (
-                            <div className="bible-loading">Loading passage...</div>
+                      {/* Proposal comments */}
+                      {proposalCommentsOpen[p.id] && (
+                        <div className="proposal-comments">
+                          {proposalCommentsLoading[p.id] && (
+                            <div className="text-tertiary" style={{ fontSize: 12, padding: 8 }}>Loading comments...</div>
                           )}
-                          {previewTexts[p.id] && previewTexts[p.id]!.verses.length > 0 && (
-                            <div className="bible-text-container" style={{ borderTop: "none", paddingTop: 0, marginTop: 0 }}>
-                              <div className="bible-translation">{previewTexts[p.id]!.translation}</div>
-                              <div className="bible-verses" style={{ fontSize: 15, lineHeight: 1.65 }}>
-                                {previewTexts[p.id]!.verses.map((v) => (
-                                  <span key={v.verse} className="bible-verse">
-                                    <sup className="verse-num">{v.verse}</sup>
-                                    {v.text}{" "}
-                                  </span>
-                                ))}
+                          {(proposalComments[p.id] ?? []).length === 0 && !proposalCommentsLoading[p.id] && (
+                            <div className="text-tertiary" style={{ fontSize: 12, padding: 8 }}>No comments yet.</div>
+                          )}
+                          {(proposalComments[p.id] ?? []).map((c) => (
+                            <div key={c.id} className="proposal-comment">
+                              <div className="proposal-comment-header">
+                                <span className="avatar avatar-sm" style={{ background: colorFor(c.authorId), width: 20, height: 20, fontSize: 10 }}>
+                                  {getAvatar(c.authorName)}
+                                </span>
+                                <span className="proposal-comment-author">{c.authorName}</span>
+                                <span className="proposal-comment-time">{relativeTime(c.createdAt)}</span>
+                                {c.canDelete && (
+                                  <button
+                                    className="btn-link"
+                                    style={{ marginLeft: "auto", fontSize: 11 }}
+                                    onClick={() => onDeleteProposalComment(c.id, p.id)}
+                                    type="button"
+                                  >
+                                    Delete
+                                  </button>
+                                )}
                               </div>
+                              <div className="proposal-comment-text">{c.text}</div>
                             </div>
-                          )}
-                          {!previewLoading[p.id] && previewTexts[p.id] === null && (
-                            <div className="text-tertiary" style={{ fontSize: 12, padding: "8px 0" }}>
-                              Could not load passage text.
-                            </div>
-                          )}
+                          ))}
+                          <div className="proposal-comment-input">
+                            <input
+                              className="input"
+                              value={proposalCommentDrafts[p.id] ?? ""}
+                              onChange={(e) => setProposalCommentDrafts((prev) => ({ ...prev, [p.id]: e.target.value.slice(0, 500) }))}
+                              placeholder="Add a comment..."
+                              maxLength={500}
+                              onKeyDown={(e) => {
+                                if (e.key === "Enter" && !e.shiftKey && (proposalCommentDrafts[p.id] ?? "").trim()) {
+                                  e.preventDefault();
+                                  onCreateProposalComment(p.id);
+                                }
+                              }}
+                            />
+                            <button
+                              className="btn btn-gold btn-sm"
+                              onClick={() => onCreateProposalComment(p.id)}
+                              disabled={submitting || !(proposalCommentDrafts[p.id] ?? "").trim()}
+                              type="button"
+                            >
+                              Post
+                            </button>
+                          </div>
                         </div>
                       )}
+
                     </div>
                   ))}
                 </div>

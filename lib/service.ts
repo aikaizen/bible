@@ -636,7 +636,7 @@ export async function getGroupSnapshot(groupId: string, userId: string) {
     getGroup(groupId),
   ]);
 
-  const [members, proposals, votes, myVote, readingItem, history, invite, pendingInvites] = await Promise.all([
+  const [members, proposals, votes, myVote, readingItem, history, invite, pendingInvites, proposalCommentCounts] = await Promise.all([
     dbQuery<{
       id: string;
       name: string;
@@ -759,7 +759,42 @@ export async function getGroupSnapshot(groupId: string, userId: string) {
        ORDER BY i.created_at DESC`,
       [groupId],
     ),
+    // Proposal comment counts
+    dbQuery<{ proposal_id: string; comment_count: string }>(
+      `SELECT pc.proposal_id, COUNT(*)::text AS comment_count
+       FROM proposal_comments pc
+       JOIN proposals p ON p.id = pc.proposal_id
+       WHERE p.week_id = $1 AND pc.deleted_at IS NULL
+       GROUP BY pc.proposal_id`,
+      [week.id],
+    ),
   ]);
+
+  // Build maps for comment counts and unread counts
+  const commentCountMap = new Map(proposalCommentCounts.map((r) => [r.proposal_id, Number(r.comment_count)]));
+  // Compute unread counts per proposal
+  const unreadCountsRaw = commentCountMap.size > 0
+    ? await dbQuery<{ proposal_id: string; unread_count: string }>(
+        `SELECT pc.proposal_id, COUNT(*)::text AS unread_count
+         FROM proposal_comments pc
+         JOIN proposals p ON p.id = pc.proposal_id
+         WHERE p.week_id = $1
+           AND pc.deleted_at IS NULL
+           AND (
+             NOT EXISTS (
+               SELECT 1 FROM proposal_comment_reads pcr
+               WHERE pcr.user_id = $2 AND pcr.proposal_id = pc.proposal_id
+             )
+             OR pc.created_at > (
+               SELECT pcr.last_read_at FROM proposal_comment_reads pcr
+               WHERE pcr.user_id = $2 AND pcr.proposal_id = pc.proposal_id
+             )
+           )
+         GROUP BY pc.proposal_id`,
+        [week.id, userId],
+      )
+    : [];
+  const unreadCountMap = new Map(unreadCountsRaw.map((r) => [r.proposal_id, Number(r.unread_count)]));
 
   const readMarks = readingItem
     ? await dbQuery<{ user_id: string; status: ReadStatus }>(
@@ -805,6 +840,8 @@ export async function getGroupSnapshot(groupId: string, userId: string) {
       voters: votes
         .filter((vote) => vote.proposal_id === proposal.id)
         .map((vote) => ({ id: vote.user_id, name: vote.user_name })),
+      commentCount: commentCountMap.get(proposal.id) ?? 0,
+      unreadCount: unreadCountMap.get(proposal.id) ?? 0,
     })),
     myRole: membership.role,
     myVoteProposalId: myVote?.proposal_id ?? null,
@@ -1444,7 +1481,7 @@ export async function getInviteByToken(token: string) {
      JOIN users u ON u.id = i.created_by
      WHERE i.token = $1
        AND (i.expires_at IS NULL OR i.expires_at > NOW())
-       AND i.status = 'pending'`,
+       AND i.status != 'cancelled'`,
     [token],
   );
 }
@@ -1887,5 +1924,106 @@ export async function deleteAnnotationReply(params: { replyId: string; userId: s
   }
 
   await dbQuery(`UPDATE annotation_replies SET deleted_at = NOW() WHERE id = $1`, [params.replyId]);
+  return { ok: true };
+}
+
+/* ─── Proposal Comments ─── */
+
+export async function getProposalComments(proposalId: string, userId: string) {
+  // Verify access: user must be in the group that owns this proposal
+  const access = await dbQueryOne<{ group_id: string }>(
+    `SELECT w.group_id
+     FROM proposals p
+     JOIN weeks w ON w.id = p.week_id
+     JOIN group_members gm ON gm.group_id = w.group_id
+     WHERE p.id = $1 AND gm.user_id = $2 AND p.deleted_at IS NULL`,
+    [proposalId, userId],
+  );
+  if (!access) throw new ServiceError("Proposal not found or access denied", 404);
+
+  const comments = await dbQuery<{
+    id: string;
+    author_id: string;
+    author_name: string;
+    text: string;
+    created_at: string;
+  }>(
+    `SELECT pc.id, pc.author_id, u.name AS author_name, pc.text, pc.created_at::text
+     FROM proposal_comments pc
+     JOIN users u ON u.id = pc.author_id
+     WHERE pc.proposal_id = $1 AND pc.deleted_at IS NULL
+     ORDER BY pc.created_at ASC`,
+    [proposalId],
+  );
+
+  // Mark as read
+  await dbQuery(
+    `INSERT INTO proposal_comment_reads(user_id, proposal_id, last_read_at)
+     VALUES ($1, $2, NOW())
+     ON CONFLICT (user_id, proposal_id)
+     DO UPDATE SET last_read_at = NOW()`,
+    [userId, proposalId],
+  );
+
+  return comments.map((c) => ({
+    id: c.id,
+    authorId: c.author_id,
+    authorName: c.author_name,
+    text: c.text,
+    createdAt: c.created_at,
+    canDelete: c.author_id === userId,
+  }));
+}
+
+export async function createProposalComment(params: {
+  proposalId: string;
+  userId: string;
+  text: string;
+}) {
+  const text = params.text.trim();
+  if (!text) throw new ServiceError("Comment cannot be empty", 422);
+  if (text.length > 500) throw new ServiceError("Comment exceeds 500 characters", 422);
+
+  const access = await dbQueryOne<{ group_id: string }>(
+    `SELECT w.group_id
+     FROM proposals p
+     JOIN weeks w ON w.id = p.week_id
+     JOIN group_members gm ON gm.group_id = w.group_id
+     WHERE p.id = $1 AND gm.user_id = $2 AND p.deleted_at IS NULL`,
+    [params.proposalId, params.userId],
+  );
+  if (!access) throw new ServiceError("Proposal not found or access denied", 404);
+
+  const comment = await dbQueryOne<{ id: string }>(
+    `INSERT INTO proposal_comments(proposal_id, author_id, text)
+     VALUES ($1, $2, $3)
+     RETURNING id`,
+    [params.proposalId, params.userId, text],
+  );
+
+  // Mark as read for the commenter
+  await dbQuery(
+    `INSERT INTO proposal_comment_reads(user_id, proposal_id, last_read_at)
+     VALUES ($1, $2, NOW())
+     ON CONFLICT (user_id, proposal_id)
+     DO UPDATE SET last_read_at = NOW()`,
+    [params.userId, params.proposalId],
+  );
+
+  return { commentId: comment?.id ?? null };
+}
+
+export async function deleteProposalComment(params: { commentId: string; userId: string }) {
+  const comment = await dbQueryOne<{ author_id: string; deleted_at: string | null }>(
+    `SELECT author_id, deleted_at::text FROM proposal_comments WHERE id = $1`,
+    [params.commentId],
+  );
+
+  if (!comment || comment.deleted_at) throw new ServiceError("Comment not found", 404);
+  if (comment.author_id !== params.userId) {
+    throw new ServiceError("Only the author can delete this comment", 403);
+  }
+
+  await dbQuery(`UPDATE proposal_comments SET deleted_at = NOW() WHERE id = $1`, [params.commentId]);
   return { ok: true };
 }

@@ -243,6 +243,26 @@ CREATE TABLE IF NOT EXISTS annotation_replies (
 CREATE INDEX IF NOT EXISTS idx_annotations_reading_item ON annotations(reading_item_id);
 CREATE INDEX IF NOT EXISTS idx_annotation_replies_annotation ON annotation_replies(annotation_id);
 
+-- Proposal comments (per-proposal discussion in voting tab)
+CREATE TABLE IF NOT EXISTS proposal_comments (
+  id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  proposal_id UUID NOT NULL REFERENCES proposals(id) ON DELETE CASCADE,
+  author_id UUID NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+  text VARCHAR(500) NOT NULL,
+  created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+  deleted_at TIMESTAMPTZ
+);
+
+CREATE INDEX IF NOT EXISTS idx_proposal_comments_proposal ON proposal_comments(proposal_id);
+
+-- Tracks when a user last read comments on a proposal (for unread badges)
+CREATE TABLE IF NOT EXISTS proposal_comment_reads (
+  user_id UUID NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+  proposal_id UUID NOT NULL REFERENCES proposals(id) ON DELETE CASCADE,
+  last_read_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+  PRIMARY KEY (user_id, proposal_id)
+);
+
 -- Google OAuth: stable account linking via Google sub ID
 DO $$
 BEGIN

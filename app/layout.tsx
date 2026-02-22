@@ -3,8 +3,8 @@ import Providers from "./providers";
 import "./globals.css";
 
 export const metadata: Metadata = {
-  title: "Bible Vote",
-  description: "Vote on weekly Bible readings with your group",
+  title: "Read the Bible Together",
+  description: "Read the Bible together with your group",
 };
 
 export const viewport: Viewport = {
