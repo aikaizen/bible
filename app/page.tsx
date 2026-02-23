@@ -1280,14 +1280,24 @@ export default function Home() {
             </div>
             <svg viewBox="0 0 24 24" style={{ width: 16, height: 16, stroke: "var(--text-tertiary)", fill: "none", strokeWidth: 2, strokeLinecap: "round", strokeLinejoin: "round", flexShrink: 0 }}><polyline points="9,18 15,12 9,6" /></svg>
           </button>
-          <button
-            className="btn btn-sm"
-            style={{ marginTop: 12, width: "100%" }}
-            onClick={onSignOut}
-            type="button"
-          >
-            Sign Out
-          </button>
+          <div style={{ display: "flex", gap: 8, marginTop: 12 }}>
+            <button
+              className="btn btn-sm"
+              style={{ flex: 1 }}
+              onClick={() => { setTab("group"); setDrawerOpen(false); }}
+              type="button"
+            >
+              Group Members
+            </button>
+            <button
+              className="btn btn-sm"
+              style={{ flex: 1 }}
+              onClick={onSignOut}
+              type="button"
+            >
+              Sign Out
+            </button>
+          </div>
         </div>
 
         {/* Group switcher */}
@@ -1963,11 +1973,13 @@ export default function Home() {
                       )}
                     </div>
 
-                    {/* Discussion */}
+                    {/* Discussion — unified comments + annotations */}
                     <div className="card stack">
                       <div className="row-between">
                         <div className="section-title" style={{ fontSize: 20 }}>Discussion</div>
-                        <span className="text-tertiary" style={{ fontSize: 12 }}>{comments.length} comments</span>
+                        <span className="text-tertiary" style={{ fontSize: 12 }}>
+                          {comments.length + annotations.length} comments
+                        </span>
                       </div>
 
                       <div className="stack-sm">
@@ -1992,62 +2004,167 @@ export default function Home() {
                         </div>
                       </div>
 
-                      {comments.length === 0 && <div className="text-tertiary" style={{ textAlign: "center", padding: 16 }}>No comments yet. Be the first to share.</div>}
+                      {comments.length === 0 && annotations.length === 0 && (
+                        <div className="text-tertiary" style={{ textAlign: "center", padding: 16 }}>No comments yet. Be the first to share.</div>
+                      )}
 
                       <div>
-                        {comments.map((c) => (
-                          <div key={c.id} className="comment">
-                            <div className="row-between">
-                              <span className="comment-author">{c.authorName}</span>
-                              <span className="comment-time">{relativeTime(c.createdAt)}</span>
-                            </div>
-                            <div className="comment-text">{c.text}</div>
-                            <div className="comment-actions">
-                              <button
-                                className="btn-link"
-                                onClick={() => setReplyOpenCommentId((cur) => (cur === c.id ? "" : c.id))}
-                                type="button"
-                              >
-                                Reply ({c.replies.length})
-                              </button>
-                              {c.canDelete && (
-                                <button className="btn-link" onClick={() => onDeleteComment(c.id)} type="button">Delete</button>
-                              )}
-                            </div>
-
-                            {replyOpenCommentId === c.id && (
-                              <div className="stack-sm" style={{ marginTop: 10 }}>
-                                <input
-                                  className="input"
-                                  value={replyDrafts[c.id] ?? ""}
-                                  onChange={(e) => setReplyDrafts((prev) => ({ ...prev, [c.id]: e.target.value.slice(0, 500) }))}
-                                  placeholder="Write a reply..."
-                                />
-                                <div className="row">
-                                  <button className="btn btn-gold btn-sm" onClick={() => onCreateComment(c.id)} type="button" disabled={submitting || !(replyDrafts[c.id] ?? "").trim()}>
-                                    Send
-                                  </button>
-                                  <button className="btn btn-sm" onClick={() => setReplyOpenCommentId("")} type="button">Cancel</button>
-                                </div>
-                              </div>
-                            )}
-
-                            {c.replies.map((r) => (
-                              <div key={r.id} className="reply">
-                                <div className="row-between">
-                                  <span className="comment-author">{r.authorName}</span>
-                                  <span className="comment-time">{relativeTime(r.createdAt)}</span>
-                                </div>
-                                <div className="comment-text">{r.text}</div>
-                                {r.canDelete && (
+                        {/* Merge comments and annotations into a single timeline */}
+                        {(() => {
+                          type DiscussionItem =
+                            | { kind: "comment"; data: Comment }
+                            | { kind: "annotation"; data: Annotation };
+                          const items: DiscussionItem[] = [
+                            ...comments.map((c) => ({ kind: "comment" as const, data: c })),
+                            ...annotations.map((a) => ({ kind: "annotation" as const, data: a })),
+                          ].sort((a, b) =>
+                            new Date(b.data.createdAt).getTime() - new Date(a.data.createdAt).getTime()
+                          );
+                          return items.map((item) => {
+                            if (item.kind === "comment") {
+                              const c = item.data;
+                              return (
+                                <div key={c.id} className="comment">
+                                  <div className="row-between">
+                                    <span className="comment-author">{c.authorName}</span>
+                                    <span className="comment-time">{relativeTime(c.createdAt)}</span>
+                                  </div>
+                                  <div className="comment-text">{c.text}</div>
                                   <div className="comment-actions">
-                                    <button className="btn-link" onClick={() => onDeleteComment(r.id)} type="button">Delete</button>
+                                    <button
+                                      className="btn-link"
+                                      onClick={() => setReplyOpenCommentId((cur) => (cur === c.id ? "" : c.id))}
+                                      type="button"
+                                    >
+                                      Reply ({c.replies.length})
+                                    </button>
+                                    {c.canDelete && (
+                                      <button className="btn-link" onClick={() => onDeleteComment(c.id)} type="button">Delete</button>
+                                    )}
+                                  </div>
+
+                                  {replyOpenCommentId === c.id && (
+                                    <div className="stack-sm" style={{ marginTop: 10 }}>
+                                      <input
+                                        className="input"
+                                        value={replyDrafts[c.id] ?? ""}
+                                        onChange={(e) => setReplyDrafts((prev) => ({ ...prev, [c.id]: e.target.value.slice(0, 500) }))}
+                                        placeholder="Write a reply..."
+                                      />
+                                      <div className="row">
+                                        <button className="btn btn-gold btn-sm" onClick={() => onCreateComment(c.id)} type="button" disabled={submitting || !(replyDrafts[c.id] ?? "").trim()}>
+                                          Send
+                                        </button>
+                                        <button className="btn btn-sm" onClick={() => setReplyOpenCommentId("")} type="button">Cancel</button>
+                                      </div>
+                                    </div>
+                                  )}
+
+                                  {c.replies.map((r) => (
+                                    <div key={r.id} className="reply">
+                                      <div className="row-between">
+                                        <span className="comment-author">{r.authorName}</span>
+                                        <span className="comment-time">{relativeTime(r.createdAt)}</span>
+                                      </div>
+                                      <div className="comment-text">{r.text}</div>
+                                      {r.canDelete && (
+                                        <div className="comment-actions">
+                                          <button className="btn-link" onClick={() => onDeleteComment(r.id)} type="button">Delete</button>
+                                        </div>
+                                      )}
+                                    </div>
+                                  ))}
+                                </div>
+                              );
+                            }
+
+                            // Annotation item
+                            const a = item.data;
+                            const annReplyKey = `ann-${a.id}`;
+                            return (
+                              <div key={a.id} className="comment">
+                                <div className="comment-verse-ref">
+                                  {a.startVerse === a.endVerse
+                                    ? `v. ${a.startVerse}`
+                                    : `vv. ${a.startVerse}\u2013${a.endVerse}`}
+                                </div>
+                                <div className="row-between">
+                                  <span className="comment-author">{a.authorName}</span>
+                                  <span className="comment-time">{relativeTime(a.createdAt)}</span>
+                                </div>
+                                <div className="comment-text">{a.text}</div>
+                                <div className="comment-actions">
+                                  <button
+                                    className="btn-link"
+                                    onClick={() => setReplyOpenCommentId((cur) => (cur === annReplyKey ? "" : annReplyKey))}
+                                    type="button"
+                                  >
+                                    Reply ({a.replies.length})
+                                  </button>
+                                  {a.canDelete && (
+                                    <button className="btn-link" onClick={() => onDeleteAnnotation(a.id)} type="button">Delete</button>
+                                  )}
+                                </div>
+
+                                {replyOpenCommentId === annReplyKey && (
+                                  <div className="stack-sm" style={{ marginTop: 10 }}>
+                                    <input
+                                      className="input"
+                                      value={replyDrafts[annReplyKey] ?? ""}
+                                      onChange={(e) => setReplyDrafts((prev) => ({ ...prev, [annReplyKey]: e.target.value.slice(0, 500) }))}
+                                      placeholder="Write a reply..."
+                                    />
+                                    <div className="row">
+                                      <button
+                                        className="btn btn-gold btn-sm"
+                                        onClick={() => {
+                                          const text = (replyDrafts[annReplyKey] ?? "").trim();
+                                          if (!text) return;
+                                          void (async () => {
+                                            try {
+                                              setSubmitting(true);
+                                              await api(`/api/annotations/${a.id}/replies`, {
+                                                method: "POST",
+                                                body: JSON.stringify({ text }),
+                                              });
+                                              setReplyDrafts((prev) => ({ ...prev, [annReplyKey]: "" }));
+                                              setReplyOpenCommentId("");
+                                              await loadAnnotations();
+                                            } catch (err) {
+                                              setError(err instanceof Error ? err.message : "Failed to post reply");
+                                            } finally {
+                                              setSubmitting(false);
+                                            }
+                                          })();
+                                        }}
+                                        type="button"
+                                        disabled={submitting || !(replyDrafts[annReplyKey] ?? "").trim()}
+                                      >
+                                        Send
+                                      </button>
+                                      <button className="btn btn-sm" onClick={() => setReplyOpenCommentId("")} type="button">Cancel</button>
+                                    </div>
                                   </div>
                                 )}
+
+                                {a.replies.map((r) => (
+                                  <div key={r.id} className="reply">
+                                    <div className="row-between">
+                                      <span className="comment-author">{r.authorName}</span>
+                                      <span className="comment-time">{relativeTime(r.createdAt)}</span>
+                                    </div>
+                                    <div className="comment-text">{r.text}</div>
+                                    {r.canDelete && (
+                                      <div className="comment-actions">
+                                        <button className="btn-link" onClick={() => onDeleteAnnotationReply(r.id)} type="button">Delete</button>
+                                      </div>
+                                    )}
+                                  </div>
+                                ))}
                               </div>
-                            ))}
-                          </div>
-                        ))}
+                            );
+                          });
+                        })()}
                       </div>
                     </div>
                   </>
