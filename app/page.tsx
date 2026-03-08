@@ -330,7 +330,6 @@ export default function Home() {
   const [proposalCommentsLoading, setProposalCommentsLoading] = useState<Record<string, boolean>>({});
 
   // Settings
-  const [showSettings, setShowSettings] = useState(false);
 
   // Admin login (hidden)
   const [brandTaps, setBrandTaps] = useState(0);
@@ -1109,16 +1108,6 @@ export default function Home() {
       await api(`/api/groups/${groupId}/proposals/archive`, {
         method: "POST",
         body: JSON.stringify({ proposalId }),
-      });
-    });
-  }
-
-  function onUpdateSettings(field: string, value: unknown) {
-    if (!groupId || !selectedUserId) return;
-    void mutate(async () => {
-      await api(`/api/groups/${groupId}/settings`, {
-        method: "PUT",
-        body: JSON.stringify({ [field]: value }),
       });
     });
   }

@@ -262,38 +262,6 @@ async function ensureWeekReadingItem(
   return upsertWeekReadingFromProposal(weekId, randomProposal, client);
 }
 
-async function syncReadingToVoteLeader(weekId: string): Promise<void> {
-  const tallies = await dbQuery<{
-    id: string;
-    reference: string;
-    vote_count: string;
-    created_at: string;
-  }>(
-    `SELECT
-       p.id,
-       p.reference,
-       COUNT(v.id)::text AS vote_count,
-       p.created_at::text
-     FROM proposals p
-     LEFT JOIN votes v ON v.proposal_id = p.id
-     WHERE p.week_id = $1
-       AND p.deleted_at IS NULL
-     GROUP BY p.id, p.reference, p.created_at
-     ORDER BY COUNT(v.id) DESC, p.created_at ASC`,
-    [weekId],
-  );
-
-  if (tallies.length === 0) return;
-
-  const topVotes = Number(tallies[0].vote_count);
-  if (topVotes <= 0) return;
-
-  const tied = tallies.filter((row) => Number(row.vote_count) === topVotes);
-  if (tied.length !== 1) return;
-
-  await upsertWeekReadingFromProposal(weekId, tied[0]);
-}
-
 async function insertSeedProposals(
   groupId: string,
   weekId: string,
@@ -1237,10 +1205,11 @@ export async function createComment(params: {
 
   await withTransaction(async (client) => {
     const access = await dbQueryOne<{ group_id: string }>(
-      `SELECT w.group_id
+      `SELECT COALESCE(p.group_id, w.group_id) AS group_id
        FROM reading_items ri
        JOIN weeks w ON w.id = ri.week_id
-       JOIN group_members gm ON gm.group_id = w.group_id
+       LEFT JOIN proposals p ON p.id = ri.proposal_id
+       JOIN group_members gm ON gm.group_id = COALESCE(p.group_id, w.group_id)
        WHERE ri.id = $1
          AND gm.user_id = $2`,
       [params.readingItemId, params.userId],
@@ -1741,11 +1710,15 @@ export async function rerollSeedProposal(params: {
 
   if (seeds.length > 0) {
     const group = await getGroup(params.groupId);
-    await dbQuery(
+    const inserted = await dbQueryOne<{ id: string }>(
       `INSERT INTO proposals(week_id, group_id, proposer_id, reference, note, is_seed, seed_week)
-       VALUES ($1, $2, $3, $4, $5, TRUE, $6::date)`,
+       VALUES ($1, $2, $3, $4, $5, TRUE, $6::date)
+       RETURNING id`,
       [proposal.week_id, params.groupId, group.owner_id, seeds[0].reference, seeds[0].note, proposal.seed_week ?? new Date().toISOString().slice(0, 10)],
     );
+    if (inserted?.id) {
+      await ensureReadingItemForProposal(params.groupId, inserted.id, seeds[0].reference);
+    }
   }
 
   return { ok: true };
