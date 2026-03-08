@@ -75,14 +75,7 @@ type BootstrapPayload = { now: string; users: User[] };
 type Snapshot = {
   group: {
     id: string; name: string; timezone: string;
-    tiePolicy: "ADMIN_PICK" | "RANDOM" | "EARLIEST";
-    liveTally: boolean; votingDurationHours: number;
     inviteToken: string | null;
-  };
-  week: {
-    id: string; startDate: string; votingCloseAt: string;
-    status: "VOTING_OPEN" | "RESOLVED" | "PENDING_MANUAL";
-    resolvedReadingId: string | null;
   };
   members: Array<{ id: string; name: string; role: "OWNER" | "ADMIN" | "MEMBER"; language: string }>;
   proposals: Array<{
@@ -90,16 +83,13 @@ type Snapshot = {
     proposerName: string; createdAt: string; voteCount: number; isSeed: boolean;
     voters: Array<{ id: string; name: string }>;
     commentCount: number; unreadCount: number;
+    readingItemId: string | null;
+    readMarks: Array<{ userId: string; status: "NOT_MARKED" | "PLANNED" | "READ" }>;
+    voted: boolean;
   }>;
   myRole: "OWNER" | "ADMIN" | "MEMBER";
-  myVoteProposalId: string | null;
-  readingItem: {
-    id: string; reference: string; proposalId: string | null;
-    note: string | null; proposerName: string | null;
-  } | null;
-  readMarks: Array<{ userId: string; status: "NOT_MARKED" | "PLANNED" | "READ" }>;
   history: Array<{
-    weekId: string; startDate: string; reference: string;
+    proposalId: string; reference: string; archivedAt: string;
     commentsCount: number; readCount: number;
   }>;
   pendingInvites: Array<{
@@ -262,13 +252,7 @@ async function api<T>(url: string, options?: RequestInit): Promise<T> {
   return payload;
 }
 
-function voteDurationLabel(hours: number): string {
-  if (hours < 24) return `${hours}h`;
-  const days = Math.floor(hours / 24);
-  const rem = hours % 24;
-  if (rem === 0) return `${days} day${days > 1 ? "s" : ""}`;
-  return `${days}d ${rem}h`;
-}
+
 
 /* ─── Main Component ─── */
 
@@ -276,7 +260,7 @@ export default function Home() {
   const { data: session, status: sessionStatus } = useSession();
   const selectedUserId = session?.user?.id ?? "";
 
-  const [tab, setTab] = useState<"vote" | "reading" | "history" | "group">("vote");
+  const [tab, setTab] = useState<"passages" | "reading" | "history" | "group">("passages");
   const [groupId, setGroupId] = useState("");
   const [snapshot, setSnapshot] = useState<Snapshot | null>(null);
   const [comments, setComments] = useState<Comment[]>([]);
@@ -358,31 +342,27 @@ export default function Home() {
 
   const selectedUser = session?.user ?? null;
 
-  const daysLeft = useMemo(() => {
-    if (!snapshot) return 0;
-    const delta = new Date(snapshot.week.votingCloseAt).getTime() - Date.now();
-    return Math.max(0, Math.ceil(delta / (24 * 60 * 60 * 1000)));
-  }, [snapshot]);
-
   const totalVotes = useMemo(
     () => snapshot?.proposals.reduce((acc, p) => acc + p.voteCount, 0) ?? 0,
     [snapshot?.proposals],
   );
 
-  const myReadStatus = useMemo(() => {
-    if (!snapshot || !selectedUserId) return "NOT_MARKED";
-    return snapshot.readMarks.find((m) => m.userId === selectedUserId)?.status ?? "NOT_MARKED";
-  }, [selectedUserId, snapshot]);
-
   const isAdmin = snapshot?.myRole === "OWNER" || snapshot?.myRole === "ADMIN";
 
-  const topVotedProposalId = useMemo(() => {
-    if (!snapshot || snapshot.proposals.length === 0) return null;
-    const maxVotes = Math.max(...snapshot.proposals.map((p) => p.voteCount));
-    if (maxVotes <= 0) return null;
-    const topProposals = snapshot.proposals.filter((p) => p.voteCount === maxVotes);
-    return topProposals.length === 1 ? topProposals[0].id : null;
-  }, [snapshot]);
+  // Currently-open passage in the reader
+  const [activePassageId, setActivePassageId] = useState<string | null>(null);
+  const activePassage = useMemo(
+    () => snapshot?.proposals.find((p) => p.id === activePassageId) ?? null,
+    [snapshot, activePassageId],
+  );
+
+  const activeReadingItemId = activePassage?.readingItemId ?? null;
+  const activeReadMarks = activePassage?.readMarks ?? [];
+
+  const myReadStatus = useMemo(() => {
+    if (!activePassage || !selectedUserId) return "NOT_MARKED";
+    return activePassage.readMarks.find((m) => m.userId === selectedUserId)?.status ?? "NOT_MARKED";
+  }, [selectedUserId, activePassage]);
 
   // Build a map of verse -> annotations for highlight rendering
   const verseAnnotationMap = useMemo(() => {
@@ -410,19 +390,48 @@ export default function Home() {
     }
   }
 
+  function openPassageInReader(proposalId: string, reference: string, readingItemId: string | null) {
+    setActivePassageId(proposalId);
+    setReaderReference(reference);
+    setTab("reading");
+    void loadBibleText(reference);
+
+    // Auto-set read status to PLANNED (reading) if currently NOT_MARKED
+    if (readingItemId && selectedUserId) {
+      const proposal = snapshot?.proposals.find((p) => p.id === proposalId);
+      const myStatus = proposal?.readMarks.find((m) => m.userId === selectedUserId)?.status;
+      if (!myStatus || myStatus === "NOT_MARKED") {
+        void api(`/api/reading-items/${readingItemId}/read-mark`, {
+          method: "POST",
+          body: JSON.stringify({ status: "PLANNED" }),
+        }).then(() => void refreshData());
+      }
+    }
+
+    // Load comments and annotations for this reading item
+    if (readingItemId) {
+      void (async () => {
+        const [c, a] = await Promise.all([
+          api<{ comments: Comment[] }>(`/api/reading-items/${readingItemId}/comments`),
+          api<{ annotations: Annotation[] }>(`/api/reading-items/${readingItemId}/annotations`),
+        ]);
+        setComments(c.comments);
+        setAnnotations(a.annotations);
+      })();
+    } else {
+      setComments([]);
+      setAnnotations([]);
+    }
+  }
+
   function openInReader(reference: string) {
     setReaderReference(reference);
     setTab("reading");
     void loadBibleText(reference);
   }
 
-  function goToWeekReading() {
-    setReaderReference(null);
-    if (snapshot?.readingItem) void loadBibleText(snapshot.readingItem.reference);
-  }
-
   function navigateReader(delta: number) {
-    const current = readerReference ?? snapshot?.readingItem?.reference;
+    const current = readerReference ?? activePassage?.reference;
     if (!current) return;
     const next = navigateChapter(current, delta);
     if (next) openInReader(next);
@@ -432,24 +441,6 @@ export default function Home() {
     const payload = await api<Snapshot>(`/api/groups/${gId}/active-week`);
     setSnapshot(payload);
     setInviteToken(payload.group.inviteToken ?? "");
-
-    if (payload.readingItem) {
-      const [c, a] = await Promise.all([
-        api<{ comments: Comment[] }>(
-          `/api/reading-items/${payload.readingItem.id}/comments`,
-        ),
-        api<{ annotations: Annotation[] }>(
-          `/api/reading-items/${payload.readingItem.id}/annotations`,
-        ),
-        loadBibleText(payload.readingItem.reference),
-      ]);
-      setComments(c.comments);
-      setAnnotations(a.annotations);
-    } else {
-      setComments([]);
-      setAnnotations([]);
-      setBibleText(null);
-    }
 
     const n = await api<{ notifications: NotificationItem[] }>(`/api/users/me/notifications`);
     setNotifications(n.notifications);
@@ -507,18 +498,18 @@ export default function Home() {
 
   // Draft persistence
   useEffect(() => {
-    if (!selectedUserId || !snapshot?.readingItem) return;
-    const key = `bible-app-draft:${snapshot.readingItem.id}:${selectedUserId}`;
+    if (!selectedUserId || !activeReadingItemId) return;
+    const key = `bible-app-draft:${activeReadingItemId}:${selectedUserId}`;
     setNewComment(window.localStorage.getItem(key) ?? "");
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [selectedUserId, snapshot?.readingItem?.id]);
+  }, [selectedUserId, activeReadingItemId]);
 
   useEffect(() => {
-    if (!selectedUserId || !snapshot?.readingItem) return;
-    const key = `bible-app-draft:${snapshot.readingItem.id}:${selectedUserId}`;
+    if (!selectedUserId || !activeReadingItemId) return;
+    const key = `bible-app-draft:${activeReadingItemId}:${selectedUserId}`;
     window.localStorage.setItem(key, newComment);
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [newComment, selectedUserId, snapshot?.readingItem?.id]);
+  }, [newComment, selectedUserId, activeReadingItemId]);
 
   /* ─── Verse selection detection ─── */
 
@@ -579,21 +570,21 @@ export default function Home() {
   }
 
   async function loadAnnotations() {
-    if (!snapshot?.readingItem) return;
+    if (!activeReadingItemId) return;
     try {
       const a = await api<{ annotations: Annotation[] }>(
-        `/api/reading-items/${snapshot.readingItem.id}/annotations`,
+        `/api/reading-items/${activeReadingItemId}/annotations`,
       );
       setAnnotations(a.annotations);
     } catch { /* ignore */ }
   }
 
   function onCreateAnnotation() {
-    if (!selectedVerses || !annotationText.trim() || !snapshot?.readingItem) return;
+    if (!selectedVerses || !annotationText.trim() || !activeReadingItemId) return;
     void (async () => {
       try {
         setSubmitting(true);
-        await api(`/api/reading-items/${snapshot.readingItem!.id}/annotations`, {
+        await api(`/api/reading-items/${activeReadingItemId!}/annotations`, {
           method: "POST",
           body: JSON.stringify({
             startVerse: selectedVerses.start,
@@ -624,7 +615,7 @@ export default function Home() {
         await loadAnnotations();
         // Refresh the active annotation
         const updated = await api<{ annotations: Annotation[] }>(
-          `/api/reading-items/${snapshot!.readingItem!.id}/annotations`,
+          `/api/reading-items/${activeReadingItemId!}/annotations`,
         );
         setAnnotations(updated.annotations);
         const refreshed = updated.annotations.find((a) => a.id === activeAnnotation.id);
@@ -660,7 +651,7 @@ export default function Home() {
         await loadAnnotations();
         if (activeAnnotation) {
           const updated = await api<{ annotations: Annotation[] }>(
-            `/api/reading-items/${snapshot!.readingItem!.id}/annotations`,
+            `/api/reading-items/${activeReadingItemId!}/annotations`,
           );
           setAnnotations(updated.annotations);
           const refreshed = updated.annotations.find((a) => a.id === activeAnnotation.id);
@@ -884,23 +875,22 @@ export default function Home() {
 
   function onVote(proposalId: string) {
     if (!groupId || !selectedUserId) return;
-    // Optimistic UI: update vote immediately
+    // Optimistic UI: toggle vote immediately
     setSnapshot((prev) => {
       if (!prev) return prev;
       const userName = prev.members.find((m) => m.id === selectedUserId)?.name ?? "";
       return {
         ...prev,
-        myVoteProposalId: proposalId,
         proposals: prev.proposals.map((p) => {
-          const hadMyVote = prev.myVoteProposalId === p.id;
-          const getsMyVote = p.id === proposalId;
-          const newVoters = hadMyVote
-            ? p.voters.filter((v) => v.id !== selectedUserId)
-            : p.voters;
+          if (p.id !== proposalId) return p;
+          const wasVoted = p.voted;
           return {
             ...p,
-            voteCount: p.voteCount + (getsMyVote ? 1 : 0) - (hadMyVote ? 1 : 0),
-            voters: getsMyVote ? [...newVoters, { id: selectedUserId, name: userName }] : newVoters,
+            voted: !wasVoted,
+            voteCount: p.voteCount + (wasVoted ? -1 : 1),
+            voters: wasVoted
+              ? p.voters.filter((v) => v.id !== selectedUserId)
+              : [...p.voters, { id: selectedUserId, name: userName }],
           };
         }),
       };
@@ -908,13 +898,10 @@ export default function Home() {
     void (async () => {
       try {
         setSubmitting(true);
-        const result = await api<{ ok: boolean; autoResolved?: boolean }>(`/api/groups/${groupId}/vote`, {
+        await api<{ ok: boolean }>(`/api/groups/${groupId}/vote`, {
           method: "POST",
           body: JSON.stringify({ proposalId }),
         });
-        if (result.autoResolved) {
-          setTab("reading");
-        }
         await refreshData();
       } catch (err) {
         setError(err instanceof Error ? err.message : "Vote failed");
@@ -938,20 +925,10 @@ export default function Home() {
     });
   }
 
-  function onResolve(proposalId?: string) {
-    if (!groupId || !selectedUserId) return;
-    void mutate(async () => {
-      await api(`/api/groups/${groupId}/resolve`, {
-        method: "POST",
-        body: JSON.stringify({ proposalId }),
-      });
-    });
-  }
-
   function onReadMark(status: "NOT_MARKED" | "PLANNED" | "READ") {
-    if (!selectedUserId || !snapshot?.readingItem) return;
+    if (!selectedUserId || !activeReadingItemId) return;
     void mutate(async () => {
-      await api(`/api/reading-items/${snapshot!.readingItem!.id}/read-mark`, {
+      await api(`/api/reading-items/${activeReadingItemId}/read-mark`, {
         method: "POST",
         body: JSON.stringify({ status }),
       });
@@ -959,11 +936,11 @@ export default function Home() {
   }
 
   function onCreateComment(parentId?: string) {
-    if (!selectedUserId || !snapshot?.readingItem) return;
+    if (!selectedUserId || !activeReadingItemId) return;
     const text = parentId ? replyDrafts[parentId] ?? "" : newComment;
     if (!text.trim()) return;
     void mutate(async () => {
-      await api(`/api/reading-items/${snapshot.readingItem?.id}/comments`, {
+      await api(`/api/reading-items/${activeReadingItemId}/comments`, {
         method: "POST",
         body: JSON.stringify({ text, parentId }),
       });
@@ -1126,14 +1103,13 @@ export default function Home() {
     });
   }
 
-  function onStartNewVote() {
+  function onArchive(proposalId: string) {
     if (!groupId || !selectedUserId) return;
     void mutate(async () => {
-      await api(`/api/groups/${groupId}/new-vote`, {
+      await api(`/api/groups/${groupId}/proposals/archive`, {
         method: "POST",
-        body: JSON.stringify({}),
+        body: JSON.stringify({ proposalId }),
       });
-      setTab("vote");
     });
   }
 
@@ -1416,60 +1392,7 @@ export default function Home() {
           )}
         </div>
 
-        {/* Group Settings (admin only) */}
-        {snapshot && isAdmin && (
-          <div className="drawer-section">
-            <div className="drawer-label" style={{ cursor: "pointer" }} onClick={() => setShowSettings((s) => !s)}>
-              Group Settings {showSettings ? "\u25B2" : "\u25BC"}
-            </div>
-            {showSettings && (
-              <div className="stack-sm" style={{ marginTop: 8 }}>
-                <div style={{ fontSize: 12, color: "var(--text-secondary)" }}>
-                  Vote Duration: {voteDurationLabel(snapshot.group.votingDurationHours)}
-                </div>
-                <select
-                  className="drawer-select"
-                  value={snapshot.group.votingDurationHours}
-                  onChange={(e) => onUpdateSettings("votingDurationHours", Number(e.target.value))}
-                >
-                  <option value={24}>24 hours (1 day)</option>
-                  <option value={48}>48 hours (2 days)</option>
-                  <option value={68}>68 hours (Mon-Wed 8pm, default)</option>
-                  <option value={72}>72 hours (3 days)</option>
-                  <option value={96}>96 hours (4 days)</option>
-                  <option value={120}>120 hours (5 days)</option>
-                  <option value={144}>144 hours (6 days)</option>
-                  <option value={168}>168 hours (full week)</option>
-                </select>
-
-                <div style={{ fontSize: 12, color: "var(--text-secondary)", marginTop: 8 }}>
-                  Tie-Breaking Policy
-                </div>
-                <select
-                  className="drawer-select"
-                  value={snapshot.group.tiePolicy}
-                  onChange={(e) => onUpdateSettings("tiePolicy", e.target.value)}
-                >
-                  <option value="ADMIN_PICK">Admin picks winner</option>
-                  <option value="RANDOM">Random selection</option>
-                  <option value="EARLIEST">Earliest proposal wins</option>
-                </select>
-
-                <div style={{ fontSize: 12, color: "var(--text-secondary)", marginTop: 8 }}>
-                  Show Live Vote Tally
-                </div>
-                <select
-                  className="drawer-select"
-                  value={snapshot.group.liveTally ? "true" : "false"}
-                  onChange={(e) => onUpdateSettings("liveTally", e.target.value === "true")}
-                >
-                  <option value="true">Yes</option>
-                  <option value="false">No (hidden until close)</option>
-                </select>
-              </div>
-            )}
-          </div>
-        )}
+        {/* Group Settings placeholder — future settings go here */}
 
         {/* Notifications */}
         <div className="drawer-section">
@@ -1489,9 +1412,9 @@ export default function Home() {
 
       {/* ── Tab Bar ── */}
       <nav className="tab-bar">
-        <button className={`tab-item ${tab === "vote" ? "active" : ""}`} onClick={() => setTab("vote")} type="button">
+        <button className={`tab-item ${tab === "passages" ? "active" : ""}`} onClick={() => setTab("passages")} type="button">
           <IconVote />
-          <span className="tab-label">Vote</span>
+          <span className="tab-label">Passages</span>
         </button>
         <button className={`tab-item ${tab === "reading" ? "active" : ""}`} onClick={() => setTab("reading")} type="button">
           <IconBook />
@@ -1538,70 +1461,79 @@ export default function Home() {
 
         {snapshot && (
           <>
-            {/* ── VOTE TAB ── */}
-            {tab === "vote" && (
+            {/* ── PASSAGES TAB ── */}
+            {tab === "passages" && (
               <section className="stack fade-in">
                 <div className="row-between">
                   <div>
-                    <div className="section-title">This Week&apos;s Vote</div>
-                    <div className="section-sub">
-                      Closes {toDateLabel(snapshot.week.votingCloseAt)} &middot; {daysLeft} day{daysLeft === 1 ? "" : "s"} left
-                    </div>
+                    <div className="section-title">Passages</div>
                   </div>
                   <span className="badge badge-gold">{totalVotes} votes</span>
                 </div>
 
-                {snapshot.week.status === "PENDING_MANUAL" && (
-                  <div className="notice">Voting closed without an automatic winner. Admin must resolve.</div>
-                )}
-
                 {snapshot.proposals.length === 0 && (
                   <div className="empty">
                     <svg className="empty-icon" viewBox="0 0 24 24"><path d="M14 2H6a2 2 0 00-2 2v16a2 2 0 002 2h12a2 2 0 002-2V8z" /><polyline points="14,2 14,8 20,8" /></svg>
-                    No proposals yet. Add one to start the week.
+                    No passages yet. Add one to get started.
                   </div>
                 )}
 
                 <div className="stack">
-                  {snapshot.proposals.map((p) => (
-                    <div key={p.id} className={`proposal ${snapshot.myVoteProposalId === p.id ? "voted" : ""}${topVotedProposalId === p.id ? " top-voted" : ""}`}>
+                  {snapshot.proposals.map((p) => {
+                    const myStatus = p.readMarks.find((rm) => rm.userId === selectedUserId)?.status ?? "NOT_MARKED";
+                    return (
+                    <div key={p.id} className={`proposal ${p.voted ? "voted" : ""}`}>
                       <div className="row-between" style={{ alignItems: "flex-start" }}>
                         <div>
                           <div className="proposal-ref">
                             {p.reference}
                             {p.isSeed && <span className="seed-badge"><IconSeed /> suggested</span>}
-                            {topVotedProposalId === p.id && <span className="top-badge">Top</span>}
                           </div>
                           {p.note && <div className="proposal-note">{p.note}</div>}
                           <div className="proposal-meta">
-                            {p.isSeed ? "System suggestion" : `Proposed by ${p.proposerName}`}
+                            {p.isSeed ? "System suggestion" : `Added by ${p.proposerName}`}
                             {p.voters.length > 0 && (
                               <> &middot; Votes: {p.voters.map((v) => v.name).join(", ")}</>
                             )}
                           </div>
+                          {/* Read status dots */}
+                          {p.readMarks.length > 0 && (
+                            <div style={{ display: "flex", gap: 4, marginTop: 4, alignItems: "center" }}>
+                              {p.readMarks.map((rm) => {
+                                const member = snapshot.members.find((m) => m.id === rm.userId);
+                                return (
+                                  <span
+                                    key={rm.userId}
+                                    className={`status-dot ${rm.status === "READ" ? "read" : rm.status === "PLANNED" ? "planned" : ""}`}
+                                    title={member ? `${member.name}: ${rm.status === "READ" ? "read" : rm.status === "PLANNED" ? "reading" : "unread"}` : ""}
+                                  />
+                                );
+                              })}
+                            </div>
+                          )}
                         </div>
                         <div className="vote-count">
-                          {snapshot.group.liveTally || snapshot.week.status === "RESOLVED"
-                            ? p.voteCount
-                            : "\u2022"}
+                          {p.voteCount}
                         </div>
                       </div>
                       <div className="proposal-actions">
                         <button
-                          className={`btn ${snapshot.myVoteProposalId === p.id ? "btn-gold" : ""}`}
+                          className={`btn ${p.voted ? "btn-gold" : ""}`}
                           onClick={() => onVote(p.id)}
-                          disabled={submitting || snapshot.week.status !== "VOTING_OPEN" || daysLeft <= 0}
+                          disabled={submitting}
                           type="button"
                         >
-                          {snapshot.myVoteProposalId === p.id && <IconCheck />}
-                          {snapshot.myVoteProposalId === p.id ? "Voted" : "Vote"}
+                          {p.voted && <IconCheck />}
+                          {p.voted ? "Voted" : "Vote"}
                         </button>
                         <button
                           className="btn btn-sm"
-                          onClick={() => openInReader(p.reference)}
+                          onClick={() => openPassageInReader(p.id, p.reference, p.readingItemId)}
                           type="button"
                         >
                           Read
+                          {myStatus === "PLANNED" && <span style={{ color: "var(--gold)", marginLeft: 4, fontSize: 10 }}>&bull;</span>}
+                          {myStatus === "READ" && <span style={{ color: "#4CAF50", marginLeft: 4, fontSize: 10 }}>&bull;</span>}
                         </button>
                         <button
                           className="btn btn-sm proposal-comment-btn"
@@ -1614,17 +1546,12 @@ export default function Home() {
                         </button>
                         {(isAdmin || p.proposerId === selectedUserId) && !p.isSeed && (
                           <button
-                            className="btn btn-danger btn-sm"
-                            onClick={() => void mutate(async () => {
-                              await api(`/api/groups/${groupId}/proposals`, {
-                                method: "DELETE",
-                                body: JSON.stringify({ proposalId: p.id }),
-                              });
-                            })}
+                            className="btn btn-sm"
+                            onClick={() => onArchive(p.id)}
                             disabled={submitting}
                             type="button"
                           >
-                            Remove
+                            Archive
                           </button>
                         )}
                         {isAdmin && p.isSeed && (
@@ -1635,11 +1562,6 @@ export default function Home() {
                             type="button"
                           >
                             Reroll
-                          </button>
-                        )}
-                        {isAdmin && snapshot.week.status === "PENDING_MANUAL" && (
-                          <button className="btn btn-gold btn-sm" onClick={() => onResolve(p.id)} disabled={submitting} type="button">
-                            Pick Winner
                           </button>
                         )}
                       </div>
@@ -1702,110 +1624,79 @@ export default function Home() {
                       )}
 
                     </div>
-                  ))}
+                    );
+                  })}
                 </div>
 
-                {/* Propose form */}
-                {snapshot.week.status === "VOTING_OPEN" && daysLeft > 0 && (
-                  <>
-                    {!showPropose ? (
-                      <button
-                        className="btn"
-                        onClick={() => setShowPropose(true)}
-                        type="button"
-                      >
-                        <IconPlus /> Propose passage
-                      </button>
-                    ) : (
-                      <div className="card stack">
-                        <div className="passage-helper">
-                          <div className="passage-helper-title">Passage size guide</div>
-                          <div className="passage-helper-text">
-                            Aim for 15-40 verses (about 5-10 min read). A single chapter or a focused section works well.
-                            Format: <strong>Book Chapter:Start-End</strong> (e.g. John 3:1-21, Psalm 23, Romans 8:18-39)
-                          </div>
-                        </div>
-                        <div className="reference-input-wrap" ref={autocompleteRef}>
-                          <input
-                            className="input"
-                            value={newReference}
-                            onChange={(e) => {
-                              const val = e.target.value;
-                              setNewReference(val);
-                              setBookSuggestions(getBookSuggestions(val));
-                            }}
-                            onBlur={() => setTimeout(() => setBookSuggestions([]), 150)}
-                            placeholder="Reference (e.g. John 3:1-21)"
-                          />
-                          {bookSuggestions.length > 0 && (
-                            <div className="autocomplete-dropdown">
-                              {bookSuggestions.map((b) => (
-                                <button
-                                  key={b}
-                                  type="button"
-                                  className="autocomplete-item"
-                                  onMouseDown={() => {
-                                    const rest = newReference.replace(/^[^0-9]*/, "");
-                                    setNewReference(rest ? `${b} ${rest}` : `${b} `);
-                                    setBookSuggestions([]);
-                                  }}
-                                >
-                                  {b}
-                                </button>
-                              ))}
-                            </div>
-                          )}
-                        </div>
-                        {isValidReference(newReference) && (
-                          <button
-                            type="button"
-                            className="btn btn-sm read-it-btn"
-                            onClick={() => openInReader(newReference)}
-                          >
-                            Read it
-                          </button>
-                        )}
-                        <textarea
-                          className="textarea"
-                          value={newNote}
-                          onChange={(e) => setNewNote(e.target.value)}
-                          maxLength={240}
-                          placeholder="Why this passage this week?"
-                        />
-                        <div className="row">
-                          <button className="btn btn-gold" onClick={onCreateProposal} type="button" disabled={submitting}>Submit</button>
-                          <button className="btn" onClick={() => setShowPropose(false)} type="button">Cancel</button>
-                        </div>
-                      </div>
-                    )}
-                  </>
-                )}
-
-                {/* Admin resolve + New vote */}
-                {isAdmin && snapshot.week.status !== "RESOLVED" && (
+                {/* Add passage form */}
+                {!showPropose ? (
                   <button
-                    className="btn btn-sm"
-                    onClick={() => onResolve()}
-                    disabled={submitting}
+                    className="btn"
+                    onClick={() => setShowPropose(true)}
                     type="button"
                   >
-                    Resolve Now (Admin)
+                    <IconPlus /> Add passage
                   </button>
-                )}
-
-                {snapshot.week.status === "RESOLVED" && (
-                  <div className="card stack" style={{ textAlign: "center" }}>
-                    <div className="text-muted">
-                      This week&apos;s vote is resolved. {snapshot.readingItem ? `Reading: ${snapshot.readingItem.reference}` : ""}
+                ) : (
+                  <div className="card stack">
+                    <div className="passage-helper">
+                      <div className="passage-helper-title">Passage size guide</div>
+                      <div className="passage-helper-text">
+                        Aim for 15-40 verses (about 5-10 min read). A single chapter or a focused section works well.
+                        Format: <strong>Book Chapter:Start-End</strong> (e.g. John 3:1-21, Psalm 23, Romans 8:18-39)
+                      </div>
                     </div>
-                    <button
-                      className="btn btn-gold"
-                      onClick={onStartNewVote}
-                      disabled={submitting}
-                      type="button"
-                    >
-                      Start New Vote
-                    </button>
+                    <div className="reference-input-wrap" ref={autocompleteRef}>
+                      <input
+                        className="input"
+                        value={newReference}
+                        onChange={(e) => {
+                          const val = e.target.value;
+                          setNewReference(val);
+                          setBookSuggestions(getBookSuggestions(val));
+                        }}
+                        onBlur={() => setTimeout(() => setBookSuggestions([]), 150)}
+                        placeholder="Reference (e.g. John 3:1-21)"
+                      />
+                      {bookSuggestions.length > 0 && (
+                        <div className="autocomplete-dropdown">
+                          {bookSuggestions.map((b) => (
+                            <button
+                              key={b}
+                              type="button"
+                              className="autocomplete-item"
+                              onMouseDown={() => {
+                                const rest = newReference.replace(/^[^0-9]*/, "");
+                                setNewReference(rest ? `${b} ${rest}` : `${b} `);
+                                setBookSuggestions([]);
+                              }}
+                            >
+                              {b}
+                            </button>
+                          ))}
+                        </div>
+                      )}
+                    </div>
+                    {isValidReference(newReference) && (
+                      <button
+                        type="button"
+                        className="btn btn-sm read-it-btn"
+                        onClick={() => openInReader(newReference)}
+                      >
+                        Read it
+                      </button>
+                    )}
+                    <textarea
+                      className="textarea"
+                      value={newNote}
+                      onChange={(e) => setNewNote(e.target.value)}
+                      maxLength={240}
+                      placeholder="Why this passage?"
+                    />
+                    <div className="row">
+                      <button className="btn btn-gold" onClick={onCreateProposal} type="button" disabled={submitting}>Submit</button>
+                      <button className="btn" onClick={() => setShowPropose(false)} type="button">Cancel</button>
+                    </div>
                   </div>
                 )}
               </section>
@@ -1814,39 +1705,34 @@ export default function Home() {
             {/* ── READING TAB ── */}
             {tab === "reading" && (
               <section className="stack fade-in">
-                {!snapshot.readingItem && !readerReference ? (
+                {!activePassage && !readerReference ? (
                   <div className="empty">
                     <svg className="empty-icon" viewBox="0 0 24 24"><path d="M2 3h6a4 4 0 014 4v14a3 3 0 00-3-3H2z" /><path d="M22 3h-6a4 4 0 00-4 4v14a3 3 0 013-3h7z" /></svg>
-                    Waiting for the vote to resolve. Discussion opens once a passage is selected.
+                    Tap &quot;Read&quot; on any passage to start reading.
                   </div>
                 ) : (
                   <>
-                    {/* Back to week's reading */}
-                    {readerReference && snapshot.readingItem && readerReference !== snapshot.readingItem.reference && (
-                      <button
-                        type="button"
-                        className="btn btn-sm reader-back-btn"
-                        onClick={goToWeekReading}
-                      >
-                        ← Back to this week&apos;s reading ({snapshot.readingItem.reference})
-                      </button>
-                    )}
+                    {/* Back to passages */}
+                    <button
+                      type="button"
+                      className="btn btn-sm reader-back-btn"
+                      onClick={() => setTab("passages")}
+                    >
+                      ← Back to passages
+                    </button>
 
                     {/* Reading card */}
                     <div className="card stack">
-                      {!readerReference && snapshot.readingItem && (
+                      {activePassage && (
                         <>
-                          <div className="text-tertiary" style={{ fontSize: 10, letterSpacing: 1.2, textTransform: "uppercase", fontWeight: 600 }}>
-                            Week of {toDateLabel(snapshot.week.startDate)}
-                          </div>
-                          {snapshot.readingItem.note && <div className="text-muted">{snapshot.readingItem.note}</div>}
-                          {snapshot.readingItem.proposerName && (
-                            <div className="text-tertiary" style={{ fontSize: 12 }}>Proposed by {snapshot.readingItem.proposerName}</div>
+                          {activePassage.note && <div className="text-muted">{activePassage.note}</div>}
+                          {!activePassage.isSeed && (
+                            <div className="text-tertiary" style={{ fontSize: 12 }}>Added by {activePassage.proposerName}</div>
                           )}
                         </>
                       )}
                       <div className="section-title">
-                        {readerReference ?? snapshot.readingItem?.reference}
+                        {readerReference ?? activePassage?.reference}
                       </div>
 
                       {/* Bible Text */}
@@ -1892,7 +1778,7 @@ export default function Home() {
                       {!bibleLoading && bibleText === null && (
                         <button
                           className="btn btn-sm"
-                          onClick={() => loadBibleText(readerReference ?? snapshot.readingItem!.reference)}
+                          onClick={() => loadBibleText(readerReference ?? activePassage?.reference ?? "")}
                           type="button"
                         >
                           Load passage text
@@ -1901,7 +1787,7 @@ export default function Home() {
 
                       {/* Chapter navigation */}
                       {(() => {
-                        const cur = readerReference ?? snapshot.readingItem?.reference ?? "";
+                        const cur = readerReference ?? activePassage?.reference ?? "";
                         const prevRef = navigateChapter(cur, -1);
                         const nextRef = navigateChapter(cur, 1);
                         if (!prevRef && !nextRef) return null;
@@ -1927,8 +1813,8 @@ export default function Home() {
                         );
                       })()}
 
-                      {/* Read status + member statuses — only for week's assigned reading */}
-                      {!readerReference && snapshot.readingItem && (
+                      {/* Read status + member statuses */}
+                      {activeReadingItemId && (
                         <>
                           <div className="read-pills">
                             <button
@@ -1936,14 +1822,14 @@ export default function Home() {
                               onClick={() => onReadMark("NOT_MARKED")}
                               type="button"
                             >
-                              Not Read
+                              Unread
                             </button>
                             <button
                               className={`read-pill ${myReadStatus === "PLANNED" ? "active" : ""}`}
                               onClick={() => onReadMark("PLANNED")}
                               type="button"
                             >
-                              Planned
+                              Reading
                             </button>
                             <button
                               className={`read-pill ${myReadStatus === "READ" ? "active-ok" : ""}`}
@@ -1956,14 +1842,14 @@ export default function Home() {
 
                           <div>
                             {snapshot.members.map((m) => {
-                              const st = snapshot.readMarks.find((rm) => rm.userId === m.id)?.status ?? "NOT_MARKED";
+                              const st = activeReadMarks.find((rm) => rm.userId === m.id)?.status ?? "NOT_MARKED";
                               return (
                                 <div key={m.id} className="member-status">
                                   <span className="avatar avatar-sm" style={{ background: colorFor(m.id) }}>{getAvatar(m.name)}</span>
                                   <span className="member-status-name">{m.name}</span>
                                   <span className={`status-dot ${st === "READ" ? "read" : st === "PLANNED" ? "planned" : ""}`} />
                                   <span className="text-tertiary" style={{ fontSize: 11, minWidth: 50, textAlign: "right" }}>
-                                    {st === "NOT_MARKED" ? "none" : st.toLowerCase()}
+                                    {st === "NOT_MARKED" ? "unread" : st === "PLANNED" ? "reading" : "read"}
                                   </span>
                                 </div>
                               );
@@ -2175,18 +2061,18 @@ export default function Home() {
             {/* ── HISTORY TAB ── */}
             {tab === "history" && (
               <section className="stack fade-in">
-                <div className="section-title">Past Readings</div>
+                <div className="section-title">Archived Passages</div>
                 {snapshot.history.length === 0 && (
                   <div className="empty">
                     <svg className="empty-icon" viewBox="0 0 24 24"><circle cx="12" cy="12" r="10" /><polyline points="12,6 12,12 16,14" /></svg>
-                    No archived weeks yet.
+                    No archived passages yet.
                   </div>
                 )}
                 {snapshot.history.map((item) => (
-                  <div key={item.weekId} className="history-item">
+                  <div key={item.proposalId} className="history-item">
                     <div>
                       <div className="history-ref">{item.reference}</div>
-                      <div className="history-meta">Week of {toDateLabel(item.startDate)}</div>
+                      <div className="history-meta">Archived {relativeTime(item.archivedAt)}</div>
                     </div>
                     <div className="history-stats">
                       <div>{item.commentsCount} comments</div>
@@ -2217,7 +2103,7 @@ export default function Home() {
                   {snapshot.members.map((m) => {
                     const proposed = snapshot.proposals.filter((p) => p.proposerId === m.id && !p.isSeed).length;
                     const voted = snapshot.proposals.filter((p) => p.voters.some((v) => v.id === m.id)).length;
-                    const readSt = snapshot.readMarks.find((rm) => rm.userId === m.id)?.status ?? "NOT_MARKED";
+                    const totalRead = snapshot.proposals.filter((p) => p.readMarks.some((rm) => rm.userId === m.id && rm.status === "READ")).length;
                     const canRemove = isAdmin && m.id !== selectedUserId && m.role !== "OWNER"
                       && (snapshot.myRole === "OWNER" || m.role !== "ADMIN");
                     return (
@@ -2230,7 +2116,7 @@ export default function Home() {
                         <div className="member-stats">
                           <div>Proposals: {proposed}</div>
                           <div>Voted: {voted > 0 ? "yes" : "no"}</div>
-                          <div>Read: {readSt === "READ" ? "yes" : readSt === "PLANNED" ? "planned" : "no"}</div>
+                          <div>Read: {totalRead}</div>
                         </div>
                         {canRemove && (
                           <button

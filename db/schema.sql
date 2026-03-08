@@ -275,6 +275,85 @@ BEGIN
 END
 $$;
 
+-- Passage-list model: proposals gain group_id + archive fields + seed_week
+DO $$
+BEGIN
+  IF NOT EXISTS (
+    SELECT 1 FROM information_schema.columns
+    WHERE table_name = 'proposals' AND column_name = 'group_id'
+  ) THEN
+    ALTER TABLE proposals ADD COLUMN group_id UUID REFERENCES groups(id) ON DELETE CASCADE;
+    -- Backfill group_id from weeks table
+    UPDATE proposals p SET group_id = w.group_id FROM weeks w WHERE w.id = p.week_id AND p.group_id IS NULL;
+  END IF;
+  IF NOT EXISTS (
+    SELECT 1 FROM information_schema.columns
+    WHERE table_name = 'proposals' AND column_name = 'archived_at'
+  ) THEN
+    ALTER TABLE proposals ADD COLUMN archived_at TIMESTAMPTZ;
+  END IF;
+  IF NOT EXISTS (
+    SELECT 1 FROM information_schema.columns
+    WHERE table_name = 'proposals' AND column_name = 'archived_by'
+  ) THEN
+    ALTER TABLE proposals ADD COLUMN archived_by UUID REFERENCES users(id);
+  END IF;
+  IF NOT EXISTS (
+    SELECT 1 FROM information_schema.columns
+    WHERE table_name = 'proposals' AND column_name = 'seed_week'
+  ) THEN
+    ALTER TABLE proposals ADD COLUMN seed_week DATE;
+  END IF;
+END
+$$;
+
+CREATE INDEX IF NOT EXISTS idx_proposals_group_id ON proposals(group_id);
+CREATE INDEX IF NOT EXISTS idx_proposals_group_active ON proposals(group_id) WHERE deleted_at IS NULL AND archived_at IS NULL;
+
+-- Votes: allow voting on multiple proposals (one vote per passage per user)
+-- Drop old unique constraint if it exists (week_id, user_id) and add new one (proposal_id, user_id)
+DO $$
+BEGIN
+  IF EXISTS (
+    SELECT 1 FROM information_schema.table_constraints
+    WHERE table_name = 'votes' AND constraint_type = 'UNIQUE'
+    AND constraint_name = 'votes_week_id_user_id_key'
+  ) THEN
+    ALTER TABLE votes DROP CONSTRAINT votes_week_id_user_id_key;
+  END IF;
+END
+$$;
+
+DO $$
+BEGIN
+  IF NOT EXISTS (
+    SELECT 1 FROM information_schema.table_constraints
+    WHERE table_name = 'votes' AND constraint_type = 'UNIQUE'
+    AND constraint_name = 'votes_proposal_id_user_id_key'
+  ) THEN
+    ALTER TABLE votes ADD CONSTRAINT votes_proposal_id_user_id_key UNIQUE (proposal_id, user_id);
+  END IF;
+END
+$$;
+
+-- Email notification preferences
+DO $$
+BEGIN
+  IF NOT EXISTS (
+    SELECT 1 FROM information_schema.columns
+    WHERE table_name = 'users' AND column_name = 'email_notifications'
+  ) THEN
+    ALTER TABLE users ADD COLUMN email_notifications BOOLEAN NOT NULL DEFAULT TRUE;
+  END IF;
+  IF NOT EXISTS (
+    SELECT 1 FROM information_schema.columns
+    WHERE table_name = 'users' AND column_name = 'email_digest_mode'
+  ) THEN
+    ALTER TABLE users ADD COLUMN email_digest_mode TEXT NOT NULL DEFAULT 'immediate';
+  END IF;
+END
+$$;
+
 -- User profile: avatar presets and uploaded images
 DO $$
 BEGIN
