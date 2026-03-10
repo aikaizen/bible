@@ -2227,3 +2227,111 @@ export async function deleteProposalComment(params: { commentId: string; userId:
   await dbQuery(`UPDATE proposal_comments SET deleted_at = NOW() WHERE id = $1`, [params.commentId]);
   return { ok: true };
 }
+
+/* ─── User Notification Preferences ─── */
+
+export interface UserPreferences {
+  notifyEmailVoting: boolean;
+  notifyEmailReminder: boolean;
+  notifyEmailWinner: boolean;
+  notifyEmailComments: boolean;
+  notifyEmailMentions: boolean;
+}
+
+export async function getUserPreferences(userId: string): Promise<UserPreferences> {
+  const row = await dbQueryOne<{
+    notify_email_voting: boolean;
+    notify_email_reminder: boolean;
+    notify_email_winner: boolean;
+    notify_email_comments: boolean;
+    notify_email_mentions: boolean;
+  }>(
+    `SELECT notify_email_voting,
+            notify_email_reminder,
+            notify_email_winner,
+            notify_email_comments,
+            notify_email_mentions
+     FROM users
+     WHERE id = $1`,
+    [userId],
+  );
+
+  if (!row) {
+    throw new ServiceError("User not found", 404);
+  }
+
+  return {
+    notifyEmailVoting: row.notify_email_voting,
+    notifyEmailReminder: row.notify_email_reminder,
+    notifyEmailWinner: row.notify_email_winner,
+    notifyEmailComments: row.notify_email_comments,
+    notifyEmailMentions: row.notify_email_mentions,
+  };
+}
+
+export async function updateUserPreferences(
+  userId: string,
+  updates: Partial<UserPreferences>,
+): Promise<UserPreferences> {
+  // Build dynamic update query
+  const fields: string[] = [];
+  const values: unknown[] = [];
+  let paramIndex = 1;
+
+  if (updates.notifyEmailVoting !== undefined) {
+    fields.push(`notify_email_voting = $${paramIndex++}`);
+    values.push(updates.notifyEmailVoting);
+  }
+  if (updates.notifyEmailReminder !== undefined) {
+    fields.push(`notify_email_reminder = $${paramIndex++}`);
+    values.push(updates.notifyEmailReminder);
+  }
+  if (updates.notifyEmailWinner !== undefined) {
+    fields.push(`notify_email_winner = $${paramIndex++}`);
+    values.push(updates.notifyEmailWinner);
+  }
+  if (updates.notifyEmailComments !== undefined) {
+    fields.push(`notify_email_comments = $${paramIndex++}`);
+    values.push(updates.notifyEmailComments);
+  }
+  if (updates.notifyEmailMentions !== undefined) {
+    fields.push(`notify_email_mentions = $${paramIndex++}`);
+    values.push(updates.notifyEmailMentions);
+  }
+
+  if (fields.length === 0) {
+    throw new ServiceError("No valid preference fields provided", 400);
+  }
+
+  values.push(userId);
+
+  const row = await dbQueryOne<{
+    notify_email_voting: boolean;
+    notify_email_reminder: boolean;
+    notify_email_winner: boolean;
+    notify_email_comments: boolean;
+    notify_email_mentions: boolean;
+  }>(
+    `UPDATE users
+     SET ${fields.join(", ")}
+     WHERE id = $${paramIndex}
+     RETURNING notify_email_voting,
+               notify_email_reminder,
+               notify_email_winner,
+               notify_email_comments,
+               notify_email_mentions`,
+    values,
+  );
+
+  if (!row) {
+    throw new ServiceError("User not found", 404);
+  }
+
+  return {
+    notifyEmailVoting: row.notify_email_voting,
+    notifyEmailReminder: row.notify_email_reminder,
+    notifyEmailWinner: row.notify_email_winner,
+    notifyEmailComments: row.notify_email_comments,
+    notifyEmailMentions: row.notify_email_mentions,
+  };
+}
