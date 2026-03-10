@@ -2545,8 +2545,8 @@ export default function Home() {
                     <div className="notice notice-error" style={{ marginBottom: 12 }}>{preferencesError}</div>
                   ) : preferences ? (
                     <div className="stack-sm">
-                      <div style={{ fontSize: 13, marginBottom: 12, color: "var(--text-secondary)" }}>
-                        Choose which email notifications you want to receive:
+                      <div style={{ fontSize: 13, marginBottom: 12, color: "var(--text-secondary)", lineHeight: 1.5 }}>
+                        Stay connected with your reading community. Choose which updates you'd like to receive:
                       </div>
 
                       <label className="preference-row">
@@ -2557,8 +2557,8 @@ export default function Home() {
                           disabled={preferencesSaving}
                         />
                         <span className="preference-label">
-                          <strong>Voting opens</strong>
-                          <span className="preference-desc">When a new week starts and voting begins</span>
+                          <strong>New week begins</strong>
+                          <span className="preference-desc">When voting opens for the upcoming week's reading</span>
                         </span>
                       </label>
 
@@ -2570,8 +2570,8 @@ export default function Home() {
                           disabled={preferencesSaving}
                         />
                         <span className="preference-label">
-                          <strong>Voting reminder</strong>
-                          <span className="preference-desc">Before voting closes for the week</span>
+                          <strong>Voting closes soon</strong>
+                          <span className="preference-desc">A gentle reminder before the voting period ends</span>
                         </span>
                       </label>
 
@@ -2583,8 +2583,8 @@ export default function Home() {
                           disabled={preferencesSaving}
                         />
                         <span className="preference-label">
-                          <strong>Winner selected</strong>
-                          <span className="preference-desc">When the weekly reading passage is chosen</span>
+                          <strong>Passage selected</strong>
+                          <span className="preference-desc">When this week's Scripture reading is chosen</span>
                         </span>
                       </label>
 
@@ -2596,8 +2596,8 @@ export default function Home() {
                           disabled={preferencesSaving}
                         />
                         <span className="preference-label">
-                          <strong>Replies to my comments</strong>
-                          <span className="preference-desc">When someone replies to your discussion comments</span>
+                          <strong>Responses to my reflections</strong>
+                          <span className="preference-desc">When someone replies to your insights or questions</span>
                         </span>
                       </label>
 
@@ -2609,8 +2609,8 @@ export default function Home() {
                           disabled={preferencesSaving}
                         />
                         <span className="preference-label">
-                          <strong>Mentions</strong>
-                          <span className="preference-desc">When someone @mentions you in a discussion</span>
+                          <strong>Someone mentions me</strong>
+                          <span className="preference-desc">When a fellow reader invites you into the conversation</span>
                         </span>
                       </label>
 
