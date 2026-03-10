@@ -315,7 +315,17 @@ export default function Home() {
   const [profileOpen, setProfileOpen] = useState(false);
   const [profileData, setProfileData] = useState<ProfileData | null>(null);
   const [profileLoading, setProfileLoading] = useState(false);
-  const [profileTab, setProfileTab] = useState<"readings" | "comments">("readings");
+  const [profileTab, setProfileTab] = useState<"readings" | "comments" | "notifications">("readings");
+  const [preferences, setPreferences] = useState<{
+    notifyEmailVoting: boolean;
+    notifyEmailReminder: boolean;
+    notifyEmailWinner: boolean;
+    notifyEmailComments: boolean;
+    notifyEmailMentions: boolean;
+  } | null>(null);
+  const [preferencesLoading, setPreferencesLoading] = useState(false);
+  const [preferencesSaving, setPreferencesSaving] = useState(false);
+  const [preferencesError, setPreferencesError] = useState<string | null>(null);
   const [editingName, setEditingName] = useState(false);
   const [profileNameDraft, setProfileNameDraft] = useState("");
 
@@ -772,6 +782,43 @@ export default function Home() {
     setProfileTab("readings");
     setEditingName(false);
     void loadProfile();
+  }
+
+  async function loadPreferences() {
+    if (!selectedUserId) return;
+    setPreferencesLoading(true);
+    setPreferencesError(null);
+    try {
+      const data = await api<{ preferences: {
+        notifyEmailVoting: boolean;
+        notifyEmailReminder: boolean;
+        notifyEmailWinner: boolean;
+        notifyEmailComments: boolean;
+        notifyEmailMentions: boolean;
+      }}>(`/api/users/${selectedUserId}/preferences`);
+      setPreferences(data.preferences);
+    } catch (err) {
+      setPreferencesError(err instanceof Error ? err.message : "Failed to load preferences");
+    } finally {
+      setPreferencesLoading(false);
+    }
+  }
+
+  async function savePreferences(updates: Partial<typeof preferences>) {
+    if (!selectedUserId || !preferences) return;
+    setPreferencesSaving(true);
+    setPreferencesError(null);
+    try {
+      const data = await api<{ preferences: typeof preferences }>(`/api/users/${selectedUserId}/preferences`, {
+        method: "PATCH",
+        body: JSON.stringify(updates),
+      });
+      setPreferences(data.preferences);
+    } catch (err) {
+      setPreferencesError(err instanceof Error ? err.message : "Failed to save preferences");
+    } finally {
+      setPreferencesSaving(false);
+    }
   }
 
   function onSelectPreset(preset: string) {
@@ -2439,6 +2486,13 @@ export default function Home() {
                 >
                   My Comments
                 </button>
+                <button
+                  type="button"
+                  className={`profile-tab ${profileTab === "notifications" ? "active" : ""}`}
+                  onClick={() => { setProfileTab("notifications"); void loadPreferences(); }}
+                >
+                  Email Settings
+                </button>
               </div>
 
               {/* Tab content */}
@@ -2480,6 +2534,95 @@ export default function Home() {
                       </div>
                     ))
                   )}
+                </div>
+              )}
+
+              {profileTab === "notifications" && (
+                <div>
+                  {preferencesLoading && !preferences ? (
+                    <div className="text-tertiary" style={{ textAlign: "center", padding: 20 }}>Loading...</div>
+                  ) : preferencesError ? (
+                    <div className="notice notice-error" style={{ marginBottom: 12 }}>{preferencesError}</div>
+                  ) : preferences ? (
+                    <div className="stack-sm">
+                      <div style={{ fontSize: 13, marginBottom: 12, color: "var(--text-secondary)" }}>
+                        Choose which email notifications you want to receive:
+                      </div>
+
+                      <label className="preference-row">
+                        <input
+                          type="checkbox"
+                          checked={preferences.notifyEmailVoting}
+                          onChange={(e) => savePreferences({ notifyEmailVoting: e.target.checked })}
+                          disabled={preferencesSaving}
+                        />
+                        <span className="preference-label">
+                          <strong>Voting opens</strong>
+                          <span className="preference-desc">When a new week starts and voting begins</span>
+                        </span>
+                      </label>
+
+                      <label className="preference-row">
+                        <input
+                          type="checkbox"
+                          checked={preferences.notifyEmailReminder}
+                          onChange={(e) => savePreferences({ notifyEmailReminder: e.target.checked })}
+                          disabled={preferencesSaving}
+                        />
+                        <span className="preference-label">
+                          <strong>Voting reminder</strong>
+                          <span className="preference-desc">Before voting closes for the week</span>
+                        </span>
+                      </label>
+
+                      <label className="preference-row">
+                        <input
+                          type="checkbox"
+                          checked={preferences.notifyEmailWinner}
+                          onChange={(e) => savePreferences({ notifyEmailWinner: e.target.checked })}
+                          disabled={preferencesSaving}
+                        />
+                        <span className="preference-label">
+                          <strong>Winner selected</strong>
+                          <span className="preference-desc">When the weekly reading passage is chosen</span>
+                        </span>
+                      </label>
+
+                      <label className="preference-row">
+                        <input
+                          type="checkbox"
+                          checked={preferences.notifyEmailComments}
+                          onChange={(e) => savePreferences({ notifyEmailComments: e.target.checked })}
+                          disabled={preferencesSaving}
+                        />
+                        <span className="preference-label">
+                          <strong>Replies to my comments</strong>
+                          <span className="preference-desc">When someone replies to your discussion comments</span>
+                        </span>
+                      </label>
+
+                      <label className="preference-row">
+                        <input
+                          type="checkbox"
+                          checked={preferences.notifyEmailMentions}
+                          onChange={(e) => savePreferences({ notifyEmailMentions: e.target.checked })}
+                          disabled={preferencesSaving}
+                        />
+                        <span className="preference-label">
+                          <strong>Mentions</strong>
+                          <span className="preference-desc">When someone @mentions you in a discussion</span>
+                        </span>
+                      </label>
+
+                      {preferencesSaving && (
+                        <div className="text-tertiary" style={{ fontSize: 12, textAlign: "center" }}>Saving...</div>
+                      )}
+
+                      <div style={{ marginTop: 16, paddingTop: 16, borderTop: "1px solid var(--border)", fontSize: 12, color: "var(--text-tertiary)" }}>
+                        You can also unsubscribe from all emails using the link at the bottom of any email we send you.
+                      </div>
+                    </div>
+                  ) : null}
                 </div>
               )}
             </div>
