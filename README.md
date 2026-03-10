@@ -7,6 +7,7 @@ A deployable MVP for group Bible reading coordination with:
 - Tie policy handling (`ADMIN_PICK`, `RANDOM`, `EARLIEST`)
 - Weekly discussion thread with 1-level replies
 - Read tracking (`NOT_MARKED`, `PLANNED`, `READ`)
+- **Email notifications** with user preferences and unsubscribe
 - Notifications for key events
 
 This app stores references only (no scripture text content).
@@ -85,6 +86,8 @@ Open [http://localhost:3000](http://localhost:3000).
 - `PATCH/DELETE /api/comments/:commentId`
 - `POST /api/reading-items/:readingItemId/read-mark`
 - `GET /api/users/:userId/notifications`
+- `GET/PATCH /api/users/:userId/preferences` — Email notification settings
+- `POST /api/unsubscribe` — One-click unsubscribe from all emails
 
 ## Notes for Supabase
 - Use the direct database URL (not anon/service API keys).
@@ -105,3 +108,54 @@ This is an MVP foundation. For production hardening, add:
 - Rate limiting and spam controls
 - Background jobs for scheduled notifications
 - Audit logging and analytics
+
+## Email Notifications (NEW)
+
+The app now sends email notifications via Resend (3000 free emails/month).
+
+### Features
+- **Voting opens** — When a new week starts
+- **Voting reminder** — Before voting closes  
+- **Winner selected** — When the weekly reading is chosen
+- **Comment replies** — When someone replies to your comment
+- **Mentions** — When you're @mentioned in a discussion
+- **User preferences** — Toggle each email type in profile "Email Settings"
+- **One-click unsubscribe** — Link in every email footer
+
+### API Endpoints Added
+- `GET/PATCH /api/users/:userId/preferences` — Email notification settings
+- `POST /api/unsubscribe` — Unsubscribe from all emails
+
+### What You Need to Provide
+1. **Resend API Key** — Sign up at https://resend.com (free tier: 3000 emails/month)
+2. **From Email Address** — Where emails come from (e.g., `notifications@bibleapp.com`)
+3. **Domain** — Your production domain for unsubscribe links
+
+### Environment Variables
+```
+RESEND_API_KEY=<your_resend_api_key>
+EMAIL_FROM=notifications@yourdomain.com
+EMAIL_FROM_NAME=Bible Reading Companion
+NEXT_PUBLIC_APP_URL=https://yourdomain.com
+```
+
+### Database Migration Required
+Run this SQL against your database (already in `db/migrations/005_add_notification_preferences.sql`):
+```sql
+ALTER TABLE users
+  ADD COLUMN IF NOT EXISTS notify_email_voting BOOLEAN NOT NULL DEFAULT true,
+  ADD COLUMN IF NOT EXISTS notify_email_reminder BOOLEAN NOT NULL DEFAULT true,
+  ADD COLUMN IF NOT EXISTS notify_email_winner BOOLEAN NOT NULL DEFAULT true,
+  ADD COLUMN IF NOT EXISTS notify_email_comments BOOLEAN NOT NULL DEFAULT true,
+  ADD COLUMN IF NOT EXISTS notify_email_mentions BOOLEAN NOT NULL DEFAULT true,
+  ADD COLUMN IF NOT EXISTS unsubscribe_token UUID DEFAULT gen_random_uuid();
+```
+
+Or use: `npm run db:migrate`
+
+### Testing
+1. Add environment variables to Vercel/local .env
+2. Run the database migration
+3. Trigger a notification (create a comment reply to yourself)
+4. Check email delivery in Resend dashboard
+5. Test unsubscribe link and preferences page
