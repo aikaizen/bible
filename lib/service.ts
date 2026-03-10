@@ -410,11 +410,23 @@ async function ensureCurrentWeekExists(groupId: string): Promise<WeekRow> {
     await insertSeedProposals(groupId, inserted.id, group.owner_id, 3, meta.startDate);
     await ensureWeekReadingItem(inserted.id);
 
+    // Get group name for email context
+    const groupForNotify = await dbQueryOne<{ name: string }>(
+      `SELECT name FROM groups WHERE id = $1`,
+      [groupId],
+    );
+
     await notifyGroupMembers(
       groupId,
       "VOTING_OPENED",
       "Voting is open for this week's reading.",
-      { groupId, weekId: inserted.id, startDate: meta.startDate, closeAt: meta.closeAt },
+      {
+        groupId,
+        weekId: inserted.id,
+        startDate: meta.startDate,
+        closeTime: meta.closeAt,
+        groupName: groupForNotify?.name,
+      },
       undefined,
     );
 
@@ -455,11 +467,22 @@ async function maybeSendVotingReminder(week: WeekRow): Promise<void> {
 
   await dbQuery(`UPDATE weeks SET reminder_sent_at = NOW() WHERE id = $1 AND reminder_sent_at IS NULL`, [week.id]);
 
+  // Get group name for email context
+  const reminderGroup = await dbQueryOne<{ name: string }>(
+    `SELECT name FROM groups WHERE id = $1`,
+    [week.group_id],
+  );
+
   await notifyGroupMembers(
     week.group_id,
     "VOTING_REMINDER",
     "24h reminder: cast your vote before voting closes.",
-    { groupId: week.group_id, weekId: week.id, closeAt: week.voting_close_at },
+    {
+      groupId: week.group_id,
+      weekId: week.id,
+      closeTime: week.voting_close_at,
+      groupName: reminderGroup?.name,
+    },
   );
 }
 
@@ -584,11 +607,24 @@ async function finalizeWeek(
       client,
     );
 
+    // Get group name for email context
+    const winnerGroup = await dbQueryOne<{ name: string }>(
+      `SELECT name FROM groups WHERE id = $1`,
+      [week.group_id],
+      client,
+    );
+
     await notifyGroupMembers(
       week.group_id,
       "WINNER_SELECTED",
       `This week's reading is ${proposal.reference}.`,
-      { groupId: week.group_id, weekId: week.id, readingItemId: reading?.id, reference: proposal.reference },
+      {
+        groupId: week.group_id,
+        weekId: week.id,
+        readingItemId: reading?.id,
+        reference: proposal.reference,
+        groupName: winnerGroup?.name,
+      },
       actorUserId,
       client,
     );
@@ -1237,12 +1273,31 @@ export async function createComment(params: {
       new Set(mentionedUsers.map((user) => user.id).filter((id) => id !== params.userId)),
     );
 
+    // Fetch commenter name and reading reference for email context
+    const commentContext = await dbQueryOne<{
+      commenter_name: string;
+      reference: string;
+    }>(
+      `SELECT u.name as commenter_name, ri.reference
+       FROM users u
+       CROSS JOIN reading_items ri
+       WHERE u.id = $1 AND ri.id = $2`,
+      [params.userId, params.readingItemId],
+      client,
+    );
+
     if (parentAuthorId && parentAuthorId !== params.userId) {
       await notifyUsers(
         [parentAuthorId],
         "COMMENT_REPLY",
         "Someone replied to your comment.",
-        { readingItemId: params.readingItemId, commentId: inserted?.id },
+        {
+          readingItemId: params.readingItemId,
+          commentId: inserted?.id,
+          commenterName: commentContext?.commenter_name,
+          commentText: text,
+          reference: commentContext?.reference,
+        },
         client,
       );
     }
@@ -1252,7 +1307,12 @@ export async function createComment(params: {
         uniqueMentionTargets,
         "MENTION",
         "You were mentioned in discussion.",
-        { readingItemId: params.readingItemId, commentId: inserted?.id },
+        {
+          readingItemId: params.readingItemId,
+          commentId: inserted?.id,
+          mentionerName: commentContext?.commenter_name,
+          reference: commentContext?.reference,
+        },
         client,
       );
     }
