@@ -4,6 +4,7 @@ import { PoolClient } from "pg";
 import { dbQuery, dbQueryOne, withTransaction } from "./db";
 import { isValidReference, normalizeReference } from "./reference";
 import { pickGlobalSeedsForDate, pickSeedPassages } from "./seed-passages";
+import { sendEmail, NotificationType, getEmailPreferenceColumn, EmailUser } from "./email";
 
 export type ReadStatus = "NOT_MARKED" | "PLANNED" | "READ";
 export type TiePolicy = "ADMIN_PICK" | "RANDOM" | "EARLIEST";
@@ -126,12 +127,13 @@ async function requireAdmin(groupId: string, userId: string, client?: PoolClient
 
 async function notifyGroupMembers(
   groupId: string,
-  type: "VOTING_OPENED" | "VOTING_REMINDER" | "WINNER_SELECTED" | "COMMENT_REPLY" | "MENTION",
+  type: NotificationType,
   text: string,
   metadata: Record<string, unknown>,
   actorUserId?: string,
   client?: PoolClient,
 ): Promise<void> {
+  // Insert in-app notifications
   await dbQuery(
     `INSERT INTO notifications(user_id, type, text, metadata)
      SELECT gm.user_id, $2::notification_type, $3, $4::jsonb
@@ -141,23 +143,78 @@ async function notifyGroupMembers(
     [groupId, type, text, JSON.stringify(metadata), actorUserId ?? null],
     client,
   );
+
+  // Send emails to users who have this notification type enabled
+  const emailPreferenceColumn = getEmailPreferenceColumn(type);
+  const usersToEmail = await dbQuery<EmailUser>(
+    `SELECT u.id, u.name, u.email, u.unsubscribe_token as "unsubscribeToken"
+     FROM group_members gm
+     JOIN users u ON u.id = gm.user_id
+     WHERE gm.group_id = $1
+       AND ($2::uuid IS NULL OR gm.user_id <> $2::uuid)
+       AND u.${emailPreferenceColumn} = true`,
+    [groupId, actorUserId ?? null],
+    client,
+  );
+
+  // Send emails asynchronously (don't block)
+  for (const user of usersToEmail) {
+    void sendEmail(user, type, {
+      groupName: metadata.groupName as string | undefined,
+      reference: metadata.reference as string | undefined,
+      weekDate: metadata.weekDate as string | undefined,
+      closeTime: metadata.closeTime as string | undefined,
+      groupId: metadata.groupId as string | undefined,
+      readingItemId: metadata.readingItemId as string | undefined,
+      commenterName: metadata.commenterName as string | undefined,
+      commentText: metadata.commentText as string | undefined,
+      mentionerName: metadata.mentionerName as string | undefined,
+    });
+  }
 }
 
 async function notifyUsers(
   userIds: string[],
-  type: "VOTING_OPENED" | "VOTING_REMINDER" | "WINNER_SELECTED" | "COMMENT_REPLY" | "MENTION",
+  type: NotificationType,
   text: string,
   metadata: Record<string, unknown>,
   client?: PoolClient,
 ): Promise<void> {
   if (userIds.length === 0) return;
 
+  // Insert in-app notifications
   await dbQuery(
     `INSERT INTO notifications(user_id, type, text, metadata)
      SELECT UNNEST($1::uuid[]), $2::notification_type, $3, $4::jsonb`,
     [userIds, type, text, JSON.stringify(metadata)],
     client,
   );
+
+  // Send emails to users who have this notification type enabled
+  const emailPreferenceColumn = getEmailPreferenceColumn(type);
+  const usersToEmail = await dbQuery<EmailUser>(
+    `SELECT u.id, u.name, u.email, u.unsubscribe_token as "unsubscribeToken"
+     FROM users u
+     WHERE u.id = ANY($1::uuid[])
+       AND u.${emailPreferenceColumn} = true`,
+    [userIds],
+    client,
+  );
+
+  // Send emails asynchronously (don't block)
+  for (const user of usersToEmail) {
+    void sendEmail(user, type, {
+      groupName: metadata.groupName as string | undefined,
+      reference: metadata.reference as string | undefined,
+      weekDate: metadata.weekDate as string | undefined,
+      closeTime: metadata.closeTime as string | undefined,
+      groupId: metadata.groupId as string | undefined,
+      readingItemId: metadata.readingItemId as string | undefined,
+      commenterName: metadata.commenterName as string | undefined,
+      commentText: metadata.commentText as string | undefined,
+      mentionerName: metadata.mentionerName as string | undefined,
+    });
+  }
 }
 
 async function getCurrentWeekMeta(groupId: string): Promise<{ startDate: string; closeAt: string }> {

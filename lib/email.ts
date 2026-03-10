@@ -219,8 +219,9 @@ export function getEmailPreferenceColumn(type: NotificationType): string {
     case "WINNER_SELECTED":
       return "notify_email_winner";
     case "COMMENT_REPLY":
-    case "MENTION":
       return "notify_email_comments";
+    case "MENTION":
+      return "notify_email_mentions";
     default:
       return "notify_email_voting";
   }
