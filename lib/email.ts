@@ -52,7 +52,7 @@ function getUnsubscribeUrl(token: string): string {
  */
 function baseEmailTemplate(content: string, unsubscribeUrl: string): { html: string; text: string } {
   const year = new Date().getFullYear();
-  
+
   const html = `<!DOCTYPE html>
 <html>
 <head>
@@ -60,38 +60,50 @@ function baseEmailTemplate(content: string, unsubscribeUrl: string): { html: str
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
   <title>Bible Reading Companion</title>
   <style>
-    body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif; line-height: 1.6; color: #333; max-width: 600px; margin: 0 auto; padding: 20px; }
-    .header { border-bottom: 2px solid #4a5568; padding-bottom: 15px; margin-bottom: 25px; }
-    .header h1 { color: #2d3748; font-size: 24px; margin: 0; }
-    .content { background: #f7fafc; padding: 25px; border-radius: 8px; margin-bottom: 25px; }
-    .button { display: inline-block; background: #4a5568; color: white; padding: 12px 24px; text-decoration: none; border-radius: 6px; margin: 15px 0; }
-    .footer { font-size: 12px; color: #718096; text-align: center; border-top: 1px solid #e2e8f0; padding-top: 20px; }
-    .footer a { color: #4a5568; }
+    body { font-family: -apple-system, BlinkMacSystemFont, 'Georgia', 'Times New Roman', serif; line-height: 1.7; color: #2d3748; max-width: 600px; margin: 0 auto; padding: 20px; background: #faf9f7; }
+    .container { background: white; border-radius: 12px; padding: 32px; box-shadow: 0 2px 8px rgba(0,0,0,0.04); }
+    .header { text-align: center; padding-bottom: 24px; margin-bottom: 28px; border-bottom: 2px solid #e8e0d5; }
+    .header h1 { color: #4a5568; font-size: 22px; margin: 0; font-weight: 600; letter-spacing: -0.3px; }
+    .tagline { font-size: 13px; color: #8b7355; margin-top: 6px; font-style: italic; }
+    .content { margin-bottom: 28px; }
+    .button { display: inline-block; background: #8b7355; color: white; padding: 14px 28px; text-decoration: none; border-radius: 8px; margin: 16px 0; font-weight: 500; transition: background 0.2s; }
+    .button:hover { background: #6d5a43; }
+    .scripture-box { background: #faf8f5; border-left: 4px solid #c9a66b; padding: 20px; margin: 20px 0; border-radius: 0 8px 8px 0; }
+    .scripture-ref { font-size: 18px; font-weight: 600; color: #4a5568; text-align: center; margin: 8px 0; }
+    .footer { font-size: 12px; color: #8b7355; text-align: center; padding-top: 24px; border-top: 1px solid #e8e0d5; }
+    .footer a { color: #8b7355; text-decoration: underline; }
+    .greeting { font-size: 16px; color: #4a5568; margin-bottom: 16px; }
+    .closing { margin-top: 24px; padding-top: 16px; color: #6d5a43; font-style: italic; }
   </style>
 </head>
 <body>
-  <div class="header">
-    <h1>${FROM_NAME}</h1>
-  </div>
-  <div class="content">
-    ${content}
-  </div>
-  <div class="footer">
-    <p>You're receiving this because you're a member of a Bible reading group.</p>
-    <p><a href="${unsubscribeUrl}">Unsubscribe from email notifications</a></p>
-    <p>&copy; ${year} ${FROM_NAME}</p>
+  <div class="container">
+    <div class="header">
+      <h1>📖 ${FROM_NAME}</h1>
+      <div class="tagline">Reading God's Word together</div>
+    </div>
+    <div class="content">
+      ${content}
+    </div>
+    <div class="footer">
+      <p>You're receiving this because you're part of a Bible reading community.</p>
+      <p><a href="${unsubscribeUrl}">Unsubscribe from email notifications</a> &nbsp;|&nbsp; <a href="${APP_URL}">Open App</a></p>
+      <p>&copy; ${year} ${FROM_NAME}</p>
+    </div>
   </div>
 </body>
 </html>`;
 
   // Plain text version
   const text = `${FROM_NAME}
+Reading God's Word together
 
 ${content.replace(/<[^>]*>/g, '').replace(/\s+/g, ' ').trim()}
 
 ---
-You're receiving this because you're a member of a Bible reading group.
+You're receiving this because you're part of a Bible reading community.
 Unsubscribe: ${unsubscribeUrl}
+Open App: ${APP_URL}
 © ${year} ${FROM_NAME}`;
 
   return { html, text };
@@ -104,60 +116,70 @@ function buildEmailContent(type: NotificationType, metadata: EmailMetadata): { s
   switch (type) {
     case "VOTING_OPENED":
       return {
-        subject: `🗳️ Voting is open - ${metadata.groupName || "Bible Reading Group"}`,
+        subject: `A new week begins — casting lots for ${metadata.groupName || "your reading group"}`,
         content: `
-          <h2>Voting is now open!</h2>
-          <p>A new week has started in <strong>${metadata.groupName || "your Bible reading group"}</strong>.</p>
-          <p>Propose a passage or vote on existing proposals for this week's reading.</p>
-          <p><strong>Voting closes:</strong> ${metadata.closeTime || "soon"}</p>
-          <a href="${APP_URL}/group/${metadata.groupId}" class="button">Go to Voting</a>
+          <p class="greeting">Peace be with you,</p>
+          <p>A new week of Scripture reading has begun in <strong>${metadata.groupName || "your Bible reading group"}</strong>.</p>
+          <p>Join your brothers and sisters in selecting this week's passage. Cast your vote or propose a reading that has been on your heart.</p>
+          <p style="color: #6d5a43; margin: 16px 0;"><strong>Voting closes:</strong> ${metadata.closeTime ? new Date(metadata.closeTime).toLocaleString('en-US', { weekday: 'long', month: 'short', day: 'numeric', hour: 'numeric', minute: '2-digit' }) : "soon"}</p>
+          <a href="${APP_URL}/group/${metadata.groupId}" class="button">Cast Your Vote</a>
+          <p class="closing">"Let the word of Christ dwell in you richly..." — Colossians 3:16</p>
         `
       };
 
     case "VOTING_REMINDER":
       return {
-        subject: `⏰ Voting closes soon - ${metadata.groupName || "Bible Reading Group"}`,
+        subject: `Voting closes soon — make your voice heard in ${metadata.groupName || "your reading group"}`,
         content: `
-          <h2>Voting closes soon!</h2>
-          <p>Don't forget to cast your vote in <strong>${metadata.groupName || "your Bible reading group"}</strong>.</p>
-          <p><strong>Voting closes:</strong> ${metadata.closeTime || "soon"}</p>
+          <p class="greeting">Greetings,</p>
+          <p>The time to cast your vote is drawing to a close in <strong>${metadata.groupName || "your Bible reading group"}</strong>.</p>
+          <p>Don't miss this opportunity to help shape the journey through Scripture that your community will take together this week.</p>
+          <p style="color: #8b4513; margin: 16px 0;"><strong>Voting closes:</strong> ${metadata.closeTime ? new Date(metadata.closeTime).toLocaleString('en-US', { weekday: 'long', month: 'short', day: 'numeric', hour: 'numeric', minute: '2-digit' }) : "soon"}</p>
           <a href="${APP_URL}/group/${metadata.groupId}" class="button">Cast Your Vote</a>
+          <p class="closing">"Where two or three are gathered in my name..." — Matthew 18:20</p>
         `
       };
 
     case "WINNER_SELECTED":
       return {
-        subject: `📖 This week's reading: ${metadata.reference || "Selected Passage"}`,
+        subject: `This week's passage — ${metadata.reference || "Selected Reading"}`,
         content: `
-          <h2>This week's reading has been chosen!</h2>
-          <p>The winning passage for <strong>${metadata.groupName || "your group"}</strong> is:</p>
-          <p style="font-size: 20px; font-weight: bold; color: #2d3748; text-align: center; margin: 25px 0; padding: 20px; background: #edf2f7; border-radius: 8px;">
-            ${metadata.reference || "Selected Passage"}
-          </p>
-          <a href="${APP_URL}/reading/${metadata.readingItemId}" class="button">Join the Discussion</a>
+          <p class="greeting">Blessings,</p>
+          <p>The Lord has guided your community to this week's reading in <strong>${metadata.groupName || "your group"}</strong>:</p>
+          <div class="scripture-box">
+            <div class="scripture-ref">${metadata.reference || "Selected Reading"}</div>
+          </div>
+          <p>May this passage speak to your hearts and draw you closer to Christ and to one another.</p>
+          <a href="${APP_URL}/reading/${metadata.readingItemId}" class="button">Read & Discuss Together</a>
+          <p class="closing">"Your word is a lamp to my feet and a light to my path." — Psalm 119:105</p>
         `
       };
 
     case "COMMENT_REPLY":
       return {
-        subject: `💬 ${metadata.commenterName || "Someone"} replied to your comment`,
+        subject: `${metadata.commenterName || "Someone"} responded to your reflection on ${metadata.reference || "this week's reading"}`,
         content: `
-          <h2>New reply to your comment</h2>
-          <p><strong>${metadata.commenterName || "Someone"}</strong> replied in the discussion on <strong>${metadata.reference || "this week's reading"}</strong>:</p>
-          <blockquote style="border-left: 4px solid #4a5568; padding-left: 15px; margin: 20px 0; color: #4a5568;">
-            "${metadata.commentText || ""}"
-          </blockquote>
-          <a href="${APP_URL}/reading/${metadata.readingItemId}" class="button">View Reply</a>
+          <p class="greeting">Hello,</p>
+          <p><strong>${metadata.commenterName || "A fellow reader"}</strong> has joined the conversation and responded to your thoughts on <strong>${metadata.reference || "this week's reading"}</strong>:</p>
+          <div class="scripture-box">
+            <p style="margin: 0; font-style: italic; color: #4a5568;">"${(metadata.commentText || "").substring(0, 200)}${(metadata.commentText || "").length > 200 ? '...' : ''}"</p>
+            <p style="margin: 8px 0 0 0; font-size: 12px; color: #8b7355;">— ${metadata.commenterName || "A fellow reader"}</p>
+          </div>
+          <p>Iron sharpens iron. Join the discussion and share what God is teaching you through His Word.</p>
+          <a href="${APP_URL}/reading/${metadata.readingItemId}" class="button">View the Conversation</a>
+          <p class="closing">"As iron sharpens iron, so one person sharpens another." — Proverbs 27:17</p>
         `
       };
 
     case "MENTION":
       return {
-        subject: `👋 ${metadata.mentionerName || "Someone"} mentioned you`,
+        subject: `${metadata.mentionerName || "Someone"} mentioned you in the discussion on ${metadata.reference || "this week's reading"}`,
         content: `
-          <h2>You were mentioned</h2>
-          <p><strong>${metadata.mentionerName || "Someone"}</strong> mentioned you in the discussion on <strong>${metadata.reference || "this week's reading"}</strong>:</p>
-          <a href="${APP_URL}/reading/${metadata.readingItemId}" class="button">View Mention</a>
+          <p class="greeting">Hi there,</p>
+          <p><strong>${metadata.mentionerName || "A fellow reader"}</strong> mentioned you in the conversation about <strong>${metadata.reference || "this week's reading"}</strong>.</p>
+          <p>Your voice matters in this community. Come see what they shared and add your own insights from Scripture.</p>
+          <a href="${APP_URL}/reading/${metadata.readingItemId}" class="button">Join the Discussion</a>
+          <p class="closing">"Carry each other's burdens, and in this way you will fulfill the law of Christ." — Galatians 6:2</p>
         `
       };
 
