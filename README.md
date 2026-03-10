@@ -109,53 +109,27 @@ This is an MVP foundation. For production hardening, add:
 - Background jobs for scheduled notifications
 - Audit logging and analytics
 
-## Email Notifications (NEW)
+## Email Notifications (Coming Soon)
 
-The app now sends email notifications via Resend (3000 free emails/month).
+Email notifications are being prepared for a future release. The infrastructure is in place but not yet activated.
 
-### Features
-- **Voting opens** — When a new week starts
-- **Voting reminder** — Before voting closes  
-- **Winner selected** — When the weekly reading is chosen
-- **Comment replies** — When someone replies to your comment
-- **Mentions** — When you're @mentioned in a discussion
-- **User preferences** — Toggle each email type in profile "Email Settings"
-- **One-click unsubscribe** — Link in every email footer
+### Current Status: In-App Notifications Only
+- ✅ Internal notifications work (red dot + drawer list)
+- ✅ All 5 notification types trigger correctly
+- 🕐 Email delivery coming in Phase 2
 
-### API Endpoints Added
-- `GET/PATCH /api/users/:userId/preferences` — Email notification settings
-- `POST /api/unsubscribe` — Unsubscribe from all emails
+### What Will Be Available
+- **New week begins** — When voting opens
+- **Voting closes soon** — Reminder before deadline
+- **Passage selected** — When weekly reading is chosen
+- **Replies to your reflections** — Discussion responses
+- **Someone mentions you** — @mentions in comments
 
-### What You Need to Provide
-1. **Resend API Key** — Sign up at https://resend.com (free tier: 3000 emails/month)
-2. **From Email Address** — Where emails come from (e.g., `notifications@bibleapp.com`)
-3. **Domain** — Your production domain for unsubscribe links
+### Future Setup (Not Required Now)
+When ready to activate email:
+1. Get Resend API key at https://resend.com
+2. Add `RESEND_API_KEY` to Vercel env vars
+3. Add `EMAIL_FROM` (e.g., `notifications@yourdomain.com`)
+4. Add `NEXT_PUBLIC_APP_URL` (your production domain)
 
-### Environment Variables
-```
-RESEND_API_KEY=<your_resend_api_key>
-EMAIL_FROM=notifications@yourdomain.com
-EMAIL_FROM_NAME=Bible Reading Companion
-NEXT_PUBLIC_APP_URL=https://yourdomain.com
-```
-
-### Database Migration Required
-Run this SQL against your database (already in `db/migrations/005_add_notification_preferences.sql`):
-```sql
-ALTER TABLE users
-  ADD COLUMN IF NOT EXISTS notify_email_voting BOOLEAN NOT NULL DEFAULT true,
-  ADD COLUMN IF NOT EXISTS notify_email_reminder BOOLEAN NOT NULL DEFAULT true,
-  ADD COLUMN IF NOT EXISTS notify_email_winner BOOLEAN NOT NULL DEFAULT true,
-  ADD COLUMN IF NOT EXISTS notify_email_comments BOOLEAN NOT NULL DEFAULT true,
-  ADD COLUMN IF NOT EXISTS notify_email_mentions BOOLEAN NOT NULL DEFAULT true,
-  ADD COLUMN IF NOT EXISTS unsubscribe_token UUID DEFAULT gen_random_uuid();
-```
-
-Or use: `npm run db:migrate`
-
-### Testing
-1. Add environment variables to Vercel/local .env
-2. Run the database migration
-3. Trigger a notification (create a comment reply to yourself)
-4. Check email delivery in Resend dashboard
-5. Test unsubscribe link and preferences page
+The app will automatically start sending emails once these are configured.

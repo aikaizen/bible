@@ -1,8 +1,9 @@
 {
-  "crons": [
+  "version": 2,
+  "builds": [
     {
-      "path": "/api/cron/weekly-rollover",
-      "schedule": "0 0 * * *"
+      "src": "package.json",
+      "use": "@vercel/next"
     }
   ]
 }
