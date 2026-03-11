@@ -13,7 +13,7 @@ export async function GET() {
       role: row.role,
       inviteToken: row.invite_token,
     }));
-    return ok({ groups });
+    return ok({ groups, isSuperAdmin: user.isSuperAdmin });
   } catch (error) {
     return handleRouteError(error);
   }

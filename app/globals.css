@@ -262,6 +262,11 @@ button, input, textarea, select {
   margin-top: 3px;
 }
 
+.notif-action-btn {
+  margin-top: 6px;
+  font-size: 12px;
+}
+
 .invite-display {
   display: flex;
   align-items: center;
@@ -690,6 +695,18 @@ button, input, textarea, select {
 .comment-author {
   font-size: 13px;
   font-weight: 600;
+}
+
+.comment-bot-badge {
+  font-size: 9px;
+  font-weight: 700;
+  color: var(--gold);
+  background: color-mix(in srgb, var(--gold) 15%, transparent);
+  padding: 1px 5px;
+  border-radius: 8px;
+  margin-left: 6px;
+  text-transform: uppercase;
+  letter-spacing: 0.5px;
 }
 
 .comment-time {
@@ -1888,3 +1905,44 @@ button, input, textarea, select {
 ::-webkit-scrollbar-track { background: transparent; }
 ::-webkit-scrollbar-thumb { background: var(--border); border-radius: 3px; }
 ::-webkit-scrollbar-thumb:hover { background: var(--border-strong); }
+
+/* ─── Super Admin ─── */
+
+.super-admin-badge {
+  display: inline-block;
+  font-size: 10px;
+  font-weight: 600;
+  letter-spacing: 0.5px;
+  text-transform: uppercase;
+  color: var(--gold);
+  background: var(--gold-dim);
+  border: 1px solid var(--gold-border);
+  border-radius: var(--radius-full);
+  padding: 2px 8px;
+  margin-left: 8px;
+  vertical-align: middle;
+}
+
+.role-select {
+  font-size: 12px;
+  font-family: var(--font-body);
+  color: var(--text-secondary);
+  background: var(--bg-surface);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  padding: 2px 6px;
+  cursor: pointer;
+  margin-top: 2px;
+}
+
+.role-select:focus {
+  outline: none;
+  border-color: var(--gold-border);
+}
+
+.add-member-row {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 6px 0;
+}

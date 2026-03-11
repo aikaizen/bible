@@ -7,11 +7,11 @@ const FROM_EMAIL = process.env.EMAIL_FROM || "notifications@biblecompanion.app";
 const FROM_NAME = process.env.EMAIL_FROM_NAME || "Bible Reading Companion";
 const APP_URL = process.env.NEXT_PUBLIC_APP_URL || "http://localhost:3000";
 
-export type NotificationType = 
-  | "VOTING_OPENED" 
-  | "VOTING_REMINDER" 
-  | "WINNER_SELECTED" 
-  | "COMMENT_REPLY" 
+export type NotificationType =
+  | "VOTING_OPENED"
+  | "VOTING_REMINDER"
+  | "WINNER_SELECTED"
+  | "COMMENT_REPLY"
   | "MENTION";
 
 export interface EmailUser {

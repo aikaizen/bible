@@ -1,4 +1,5 @@
 import crypto from "node:crypto";
+import bcrypt from "bcryptjs";
 
 import NextAuth from "next-auth";
 import Credentials from "next-auth/providers/credentials";
@@ -29,15 +30,26 @@ declare module "@auth/core/jwt" {
 function verifyAdminPassword(input: string): boolean {
   const expected = process.env.ADMIN_PASSWORD_HASH;
   if (!expected) return false;
-  const inputHash = crypto.createHash("sha256").update(input).digest("hex");
-  try {
-    return crypto.timingSafeEqual(
-      Buffer.from(inputHash, "hex"),
-      Buffer.from(expected, "hex"),
-    );
-  } catch {
-    return false;
+
+  // Support bcrypt hashes for secure password storage.
+  if (/^\$2[aby]\$\d{2}\$/.test(expected)) {
+    return bcrypt.compareSync(input, expected);
   }
+
+  // Backward compatibility for existing SHA-256 env values.
+  if (/^[a-f0-9]{64}$/i.test(expected)) {
+    const inputHash = crypto.createHash("sha256").update(input).digest("hex");
+    try {
+      return crypto.timingSafeEqual(
+        Buffer.from(inputHash, "hex"),
+        Buffer.from(expected, "hex"),
+      );
+    } catch {
+      return false;
+    }
+  }
+
+  return false;
 }
 
 async function upsertUserByEmail(email: string, name: string): Promise<string | null> {
@@ -74,6 +86,11 @@ export const { handlers, auth, signIn, signOut } = NextAuth({
 
         const dbId = await upsertUserByEmail(email, email.split("@")[0]);
         if (!dbId) return null;
+        // Flag as superadmin on admin-credentials login
+        await dbQueryOne(
+          `UPDATE users SET is_superadmin = TRUE WHERE id = $1 RETURNING id`,
+          [dbId],
+        );
         return { id: dbId, dbId, email, name: email.split("@")[0] };
       },
     }),

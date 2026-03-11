@@ -9,7 +9,7 @@ export async function DELETE(
   try {
     const user = await getAuthUser();
     const { commentId } = await context.params;
-    const data = await deleteProposalComment({ commentId, userId: user.id });
+    const data = await deleteProposalComment({ commentId, userId: user.id, isSuperAdmin: user.isSuperAdmin });
     return ok(data);
   } catch (error) {
     return handleRouteError(error);

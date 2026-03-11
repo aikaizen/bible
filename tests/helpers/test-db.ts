@@ -15,7 +15,8 @@ CREATE TYPE notification_type AS ENUM (
   'VOTING_REMINDER',
   'WINNER_SELECTED',
   'COMMENT_REPLY',
-  'MENTION'
+  'MENTION',
+  'PASSAGE_READ'
 );
 
 CREATE TABLE users (
@@ -24,6 +25,10 @@ CREATE TABLE users (
   email TEXT UNIQUE NOT NULL,
   default_language TEXT NOT NULL DEFAULT 'en',
   google_id TEXT UNIQUE,
+  avatar_preset TEXT,
+  avatar_image TEXT,
+  is_bot BOOLEAN NOT NULL DEFAULT FALSE,
+  is_superadmin BOOLEAN NOT NULL DEFAULT FALSE,
   created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
 
@@ -51,6 +56,10 @@ CREATE TABLE invites (
   group_id UUID NOT NULL REFERENCES groups(id) ON DELETE CASCADE,
   token TEXT NOT NULL UNIQUE,
   created_by UUID NOT NULL REFERENCES users(id) ON DELETE RESTRICT,
+  recipient_name TEXT,
+  recipient_contact TEXT,
+  status TEXT NOT NULL DEFAULT 'pending',
+  accepted_by UUID REFERENCES users(id) ON DELETE SET NULL,
   expires_at TIMESTAMPTZ,
   created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
@@ -127,6 +136,42 @@ CREATE TABLE notifications (
   metadata JSONB NOT NULL DEFAULT '{}'::jsonb,
   created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
   read_at TIMESTAMPTZ
+);
+
+CREATE TABLE annotations (
+  id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  reading_item_id UUID NOT NULL REFERENCES reading_items(id) ON DELETE CASCADE,
+  author_id UUID NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+  start_verse INT NOT NULL,
+  end_verse INT NOT NULL,
+  text VARCHAR(500) NOT NULL,
+  created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+  deleted_at TIMESTAMPTZ
+);
+
+CREATE TABLE annotation_replies (
+  id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  annotation_id UUID NOT NULL REFERENCES annotations(id) ON DELETE CASCADE,
+  author_id UUID NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+  text VARCHAR(500) NOT NULL,
+  created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+  deleted_at TIMESTAMPTZ
+);
+
+CREATE TABLE proposal_comments (
+  id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  proposal_id UUID NOT NULL REFERENCES proposals(id) ON DELETE CASCADE,
+  author_id UUID NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+  text VARCHAR(500) NOT NULL,
+  created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+  deleted_at TIMESTAMPTZ
+);
+
+CREATE TABLE proposal_comment_reads (
+  user_id UUID NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+  proposal_id UUID NOT NULL REFERENCES proposals(id) ON DELETE CASCADE,
+  last_read_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+  PRIMARY KEY (user_id, proposal_id)
 );
 `;
 

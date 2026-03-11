@@ -15,7 +15,7 @@ export async function GET(
     const user = await getAuthUser();
     const { readingItemId } = await context.params;
 
-    const comments = await getComments(readingItemId, user.id);
+    const comments = await getComments(readingItemId, user.id, user.isSuperAdmin);
     return ok({ comments });
   } catch (error) {
     return handleRouteError(error);

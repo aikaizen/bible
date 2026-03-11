@@ -34,7 +34,7 @@ export async function DELETE(
     const user = await getAuthUser();
     const { commentId } = await context.params;
 
-    const data = await deleteComment({ commentId, userId: user.id });
+    const data = await deleteComment({ commentId, userId: user.id, isSuperAdmin: user.isSuperAdmin });
     return ok(data);
   } catch (error) {
     return handleRouteError(error);

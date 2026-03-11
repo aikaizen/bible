@@ -25,6 +25,8 @@ This app stores references only (no scripture text content).
 5. In Vercel project settings, add environment variable:
    - `DATABASE_URL=<your_supabase_connection_string>`
    - `CRON_SECRET=<long_random_secret>`
+   - `RESEND_API_KEY=<your_resend_api_key>` (optional, enables verse-comment emails)
+   - `EMAIL_FROM=<from_email@yourdomain.com>` (optional, enables verse-comment emails)
 6. Deploy once.
 7. Run migration against Supabase:
 ```bash
@@ -99,6 +101,8 @@ Open [http://localhost:3000](http://localhost:3000).
 - If proposals exist but no votes are cast, resolution falls back to a random proposal.
 - If there are no proposals, week stays `PENDING_MANUAL` for admin pick.
 - Mentions (`@NameNoSpaces`) and replies generate notifications.
+- Verse comments send email notifications to other group members when `RESEND_API_KEY` and `EMAIL_FROM` are configured.
+- Replies in verse-comment threads send a different email to users who already replied in that thread.
 - Comment edit window is 5 minutes; delete is always allowed for author.
 - Reader zone is always synced to a shared group passage (created immediately for each active week).
 

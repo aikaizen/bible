@@ -103,17 +103,17 @@ type Snapshot = {
     commentsCount: number; readCount: number;
   }>;
   pendingInvites: Array<{
-    id: string; token: string; recipientName: string;
+    id: string; token: string | null; recipientName: string;
     recipientContact: string | null; createdBy: string;
     creatorName: string; createdAt: string;
   }>;
 };
 
 type Comment = {
-  id: string; authorId: string; authorName: string; text: string;
+  id: string; authorId: string; authorName: string; isBot?: boolean; text: string;
   createdAt: string; updatedAt: string; canEdit: boolean; canDelete: boolean;
   replies: Array<{
-    id: string; authorId: string; authorName: string; text: string;
+    id: string; authorId: string; authorName: string; isBot?: boolean; text: string;
     createdAt: string; updatedAt: string; canEdit: boolean; canDelete: boolean;
   }>;
 };
@@ -152,7 +152,7 @@ type ProfileData = {
 };
 
 type AnnotationReply = {
-  id: string; authorId: string; authorName: string;
+  id: string; authorId: string; authorName: string; isBot?: boolean;
   text: string; createdAt: string; canDelete: boolean;
 };
 
@@ -355,8 +355,16 @@ export default function Home() {
   const [proposalCommentDrafts, setProposalCommentDrafts] = useState<Record<string, string>>({});
   const [proposalCommentsLoading, setProposalCommentsLoading] = useState<Record<string, boolean>>({});
 
+  // Notification actions
+  const [handledNotifIds, setHandledNotifIds] = useState<Set<string>>(new Set());
+
   // Settings
   const [showSettings, setShowSettings] = useState(false);
+
+  // Super admin
+  const [isSuperAdmin, setIsSuperAdmin] = useState(false);
+  const [addMemberSearch, setAddMemberSearch] = useState("");
+  const [allUsers, setAllUsers] = useState<User[]>([]);
 
   // Admin login (hidden)
   const [brandTaps, setBrandTaps] = useState(0);
@@ -466,8 +474,9 @@ export default function Home() {
   }
 
   async function loadUserGroups(): Promise<UserGroup[]> {
-    const payload = await api<{ groups: UserGroup[] }>(`/api/users/me/groups`);
+    const payload = await api<{ groups: UserGroup[]; isSuperAdmin?: boolean }>(`/api/users/me/groups`);
     setUserGroups(payload.groups);
+    setIsSuperAdmin(payload.isSuperAdmin ?? false);
     return payload.groups;
   }
 
@@ -495,7 +504,8 @@ export default function Home() {
 
     void (async () => {
       try {
-        await api<BootstrapPayload>("/api/bootstrap");
+        const bootstrapData = await api<BootstrapPayload>("/api/bootstrap");
+        setAllUsers(bootstrapData.users);
 
         void loadProfile();
         const groups = await loadUserGroups();
@@ -1005,6 +1015,32 @@ export default function Home() {
     });
   }
 
+  async function onAddFromNotification(item: NotificationItem) {
+    const { groupId: targetGroupId, reference } = item.metadata as { groupId: string; reference: string };
+    try {
+      setSubmitting(true);
+      await api(`/api/groups/${targetGroupId}/proposals`, {
+        method: "POST",
+        body: JSON.stringify({ reference, note: "Suggested after someone read this passage" }),
+      });
+      setHandledNotifIds((prev) => new Set(prev).add(item.id));
+      await refreshData();
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "Failed to add proposal");
+    } finally {
+      setSubmitting(false);
+    }
+  }
+
+  function onReadNowFromNotification(item: NotificationItem) {
+    const meta = item.metadata as { groupId?: string; readingItemId?: string };
+    if (meta.groupId && meta.groupId !== groupId) {
+      onChangeGroup(meta.groupId);
+    }
+    setTab("reading");
+    setDrawerOpen(false);
+  }
+
   function onCreateComment(parentId?: string) {
     if (!selectedUserId || !snapshot?.readingItem) return;
     const text = parentId ? replyDrafts[parentId] ?? "" : newComment;
@@ -1148,6 +1184,29 @@ export default function Home() {
     });
   }
 
+  function onChangeRole(targetUserId: string, memberName: string, newRole: string) {
+    if (!groupId || !selectedUserId) return;
+    const label = newRole === "OWNER" ? "This will demote the current owner to Admin. Continue?" : `Change ${memberName}'s role to ${newRole}?`;
+    if (!confirm(label)) return;
+    void mutate(async () => {
+      await api(`/api/groups/${groupId}/members`, {
+        method: "PATCH",
+        body: JSON.stringify({ targetUserId, newRole }),
+      });
+    });
+  }
+
+  function onAddMemberToGroup(targetUserId: string) {
+    if (!groupId || !selectedUserId) return;
+    void mutate(async () => {
+      await api(`/api/groups/${groupId}/members`, {
+        method: "POST",
+        body: JSON.stringify({ targetUserId }),
+      });
+      setAddMemberSearch("");
+    });
+  }
+
   function onShareInviteLink(token: string, recipientName: string) {
     const inviteUrl = `${window.location.origin}/invite/${token}`;
     const shareText = `Hey ${recipientName}! Join me on a journey to read the Bible together: ${inviteUrl}`;
@@ -1279,7 +1338,10 @@ export default function Home() {
       {/* ── Top Bar ── */}
       <header className="topbar">
         <div className="topbar-brand">Read the Bible Together</div>
-        <div className="topbar-group">{snapshot?.group.name ?? ""}</div>
+        <div className="topbar-group">
+          {snapshot?.group.name ?? ""}
+          {isSuperAdmin && <span className="super-admin-badge">Admin</span>}
+        </div>
         <div className="topbar-actions">
           <button className="icon-btn" onClick={() => void refreshData()} type="button" disabled={submitting}>
             <svg viewBox="0 0 24 24"><polyline points="23,4 23,10 17,10" /><polyline points="1,20 1,14 7,14" /><path d="M3.51 9a9 9 0 0114.85-3.36L23 10M1 14l4.64 4.36A9 9 0 0020.49 15" /></svg>
@@ -1527,6 +1589,25 @@ export default function Home() {
             notifications.slice(0, 15).map((item) => (
               <div key={item.id} className="drawer-notif">
                 <div className="drawer-notif-text">{item.text}</div>
+                {item.type === "PASSAGE_READ" && (item.metadata as Record<string, unknown>)?.type === "suggest" && (
+                  <button
+                    className="btn btn-gold btn-sm notif-action-btn"
+                    onClick={() => onAddFromNotification(item)}
+                    disabled={submitting || handledNotifIds.has(item.id)}
+                    type="button"
+                  >
+                    {handledNotifIds.has(item.id) ? "Added!" : "Add to List"}
+                  </button>
+                )}
+                {item.type === "PASSAGE_READ" && (item.metadata as Record<string, unknown>)?.type === "current" && (
+                  <button
+                    className="btn btn-sm notif-action-btn"
+                    onClick={() => onReadNowFromNotification(item)}
+                    type="button"
+                  >
+                    Read Now
+                  </button>
+                )}
                 <div className="drawer-notif-time">{relativeTime(item.createdAt)}</div>
               </div>
             ))
@@ -2073,7 +2154,7 @@ export default function Home() {
                               return (
                                 <div key={c.id} className="comment">
                                   <div className="row-between">
-                                    <span className="comment-author">{c.authorName}</span>
+                                    <span className="comment-author">{c.authorName}{c.isBot && <span className="comment-bot-badge">AI</span>}</span>
                                     <span className="comment-time">{relativeTime(c.createdAt)}</span>
                                   </div>
                                   <div className="comment-text">{c.text}</div>
@@ -2110,7 +2191,7 @@ export default function Home() {
                                   {c.replies.map((r) => (
                                     <div key={r.id} className="reply">
                                       <div className="row-between">
-                                        <span className="comment-author">{r.authorName}</span>
+                                        <span className="comment-author">{r.authorName}{r.isBot && <span className="comment-bot-badge">AI</span>}</span>
                                         <span className="comment-time">{relativeTime(r.createdAt)}</span>
                                       </div>
                                       <div className="comment-text">{r.text}</div>
@@ -2197,7 +2278,7 @@ export default function Home() {
                                 {a.replies.map((r) => (
                                   <div key={r.id} className="reply">
                                     <div className="row-between">
-                                      <span className="comment-author">{r.authorName}</span>
+                                      <span className="comment-author">{r.authorName}{r.isBot && <span className="comment-bot-badge">AI</span>}</span>
                                       <span className="comment-time">{relativeTime(r.createdAt)}</span>
                                     </div>
                                     <div className="comment-text">{r.text}</div>
@@ -2265,14 +2346,27 @@ export default function Home() {
                     const proposed = snapshot.proposals.filter((p) => p.proposerId === m.id && !p.isSeed).length;
                     const voted = snapshot.proposals.filter((p) => p.voters.some((v) => v.id === m.id)).length;
                     const readSt = snapshot.readMarks.find((rm) => rm.userId === m.id)?.status ?? "NOT_MARKED";
-                    const canRemove = isAdmin && m.id !== selectedUserId && m.role !== "OWNER"
-                      && (snapshot.myRole === "OWNER" || m.role !== "ADMIN");
+                    const canRemove = isSuperAdmin || (isAdmin && m.id !== selectedUserId && m.role !== "OWNER"
+                      && (snapshot.myRole === "OWNER" || m.role !== "ADMIN"));
                     return (
                       <div key={m.id} className="member-card">
                         <span className="avatar" style={{ background: colorFor(m.id) }}>{getAvatar(m.name)}</span>
                         <div className="member-info">
                           <div className="member-name">{m.name}</div>
-                          <div className="member-role">{m.role} &middot; {m.language}</div>
+                          {isSuperAdmin ? (
+                            <select
+                              className="role-select"
+                              value={m.role}
+                              onChange={(e) => onChangeRole(m.id, m.name, e.target.value)}
+                              disabled={submitting}
+                            >
+                              <option value="MEMBER">MEMBER</option>
+                              <option value="ADMIN">ADMIN</option>
+                              <option value="OWNER">OWNER</option>
+                            </select>
+                          ) : (
+                            <div className="member-role">{m.role} &middot; {m.language}</div>
+                          )}
                         </div>
                         <div className="member-stats">
                           <div>Proposals: {proposed}</div>
@@ -2295,6 +2389,43 @@ export default function Home() {
                   })}
                 </div>
 
+                {/* Super Admin: Add Member */}
+                {isSuperAdmin && (
+                  <div className="card stack" style={{ marginTop: 16 }}>
+                    <div className="section-title" style={{ fontSize: 16 }}>Add Member</div>
+                    <input
+                      className="drawer-input"
+                      placeholder="Search users by name..."
+                      value={addMemberSearch}
+                      onChange={(e) => setAddMemberSearch(e.target.value)}
+                    />
+                    {addMemberSearch.trim().length >= 2 && (() => {
+                      const memberIds = new Set(snapshot.members.map((m) => m.id));
+                      const matches = allUsers
+                        .filter((u) => !memberIds.has(u.id) && u.name.toLowerCase().includes(addMemberSearch.toLowerCase()))
+                        .slice(0, 5);
+                      return matches.length > 0 ? (
+                        <div className="stack" style={{ gap: 4 }}>
+                          {matches.map((u) => (
+                            <div key={u.id} className="add-member-row">
+                              <span className="avatar avatar-sm" style={{ background: colorFor(u.id) }}>{getAvatar(u.name)}</span>
+                              <span style={{ flex: 1 }}>{u.name}</span>
+                              <button
+                                className="btn btn-sm btn-primary"
+                                onClick={() => onAddMemberToGroup(u.id)}
+                                disabled={submitting}
+                                type="button"
+                              >
+                                Add
+                              </button>
+                            </div>
+                          ))}
+                        </div>
+                      ) : <div className="text-tertiary" style={{ fontSize: 13 }}>No matching users found</div>;
+                    })()}
+                  </div>
+                )}
+
                 {/* Pending Invites */}
                 {snapshot.pendingInvites.length > 0 && (
                   <div className="card stack">
@@ -2312,13 +2443,17 @@ export default function Home() {
                           </div>
                         </div>
                         <div className="pending-invite-actions">
-                          <button
-                            className="btn btn-sm"
-                            onClick={() => onShareInviteLink(inv.token, inv.recipientName)}
-                            type="button"
-                          >
-                            Resend
-                          </button>
+                          {inv.token && (
+                            <button
+                              className="btn btn-sm"
+                              onClick={() => {
+                                if (inv.token) onShareInviteLink(inv.token, inv.recipientName);
+                              }}
+                              type="button"
+                            >
+                              Resend
+                            </button>
+                          )}
                           {(inv.createdBy === selectedUserId || isAdmin) && (
                             <button
                               className="btn btn-sm btn-danger"
@@ -2719,7 +2854,7 @@ export default function Home() {
                             {getAvatar(r.authorName)}
                           </span>
                           <div>
-                            <div className="sheet-annotation-author">{r.authorName}</div>
+                            <div className="sheet-annotation-author">{r.authorName}{r.isBot && <span className="comment-bot-badge">AI</span>}</div>
                             <div className="sheet-annotation-time">{relativeTime(r.createdAt)}</div>
                           </div>
                           {r.canDelete && (

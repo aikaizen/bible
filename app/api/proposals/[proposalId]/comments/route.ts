@@ -9,7 +9,7 @@ export async function GET(
   try {
     const user = await getAuthUser();
     const { proposalId } = await context.params;
-    const comments = await getProposalComments(proposalId, user.id);
+    const comments = await getProposalComments(proposalId, user.id, user.isSuperAdmin);
     return ok({ comments });
   } catch (error) {
     return handleRouteError(error);

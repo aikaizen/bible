@@ -292,3 +292,21 @@ BEGIN
   END IF;
 END
 $$;
+
+-- Bot user flag (for Deacon AI assistant)
+ALTER TABLE users ADD COLUMN IF NOT EXISTS is_bot BOOLEAN NOT NULL DEFAULT FALSE;
+
+-- Super admin flag (set via admin credentials login)
+ALTER TABLE users ADD COLUMN IF NOT EXISTS is_superadmin BOOLEAN NOT NULL DEFAULT FALSE;
+
+-- PASSAGE_READ notification type (for read-mark social notifications)
+DO $$
+BEGIN
+  IF NOT EXISTS (
+    SELECT 1 FROM pg_enum
+    WHERE enumtypid = 'notification_type'::regtype AND enumlabel = 'PASSAGE_READ'
+  ) THEN
+    ALTER TYPE notification_type ADD VALUE 'PASSAGE_READ';
+  END IF;
+END
+$$;

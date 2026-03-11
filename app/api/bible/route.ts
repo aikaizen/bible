@@ -13,18 +13,55 @@ const cache = new Map<
 >();
 
 const CACHE_TTL = 7 * 24 * 60 * 60 * 1000; // 7 days
+const MAX_CACHE_ENTRIES = 500;
+
+function normalizeReference(value: string): string {
+  return value.replace(/\s+/g, " ").trim();
+}
+
+function isReferenceInputSafe(value: string): boolean {
+  if (value.length === 0 || value.length > 120) return false;
+  return /^[0-9A-Za-z ,:;\-–]+$/.test(value);
+}
+
+function setCachedValue(
+  key: string,
+  value: {
+    reference: string;
+    verses: Array<{ verse: number; text: string }>;
+    text: string;
+    translation: string;
+    fetchedAt: number;
+  },
+) {
+  // Keep insertion order as LRU.
+  if (cache.has(key)) cache.delete(key);
+  cache.set(key, value);
+  if (cache.size <= MAX_CACHE_ENTRIES) return;
+  const oldest = cache.keys().next().value;
+  if (oldest) cache.delete(oldest);
+}
 
 export async function GET(request: NextRequest) {
-  const reference = request.nextUrl.searchParams.get("reference");
+  const rawReference = request.nextUrl.searchParams.get("reference");
+  const reference = rawReference ? normalizeReference(rawReference) : "";
 
   if (!reference) {
     return NextResponse.json({ error: "reference parameter is required" }, { status: 400 });
   }
+  if (!isReferenceInputSafe(reference)) {
+    return NextResponse.json({ error: "Invalid reference format" }, { status: 422 });
+  }
 
-  const cacheKey = reference.toLowerCase().replace(/\s+/g, " ").trim();
+  const cacheKey = reference.toLowerCase();
   const cached = cache.get(cacheKey);
-  if (cached && Date.now() - cached.fetchedAt < CACHE_TTL) {
-    return NextResponse.json(cached);
+  if (cached) {
+    if (Date.now() - cached.fetchedAt < CACHE_TTL) {
+      // Refresh recency on cache hit.
+      setCachedValue(cacheKey, cached);
+      return NextResponse.json(cached);
+    }
+    cache.delete(cacheKey);
   }
 
   try {
@@ -59,7 +96,7 @@ export async function GET(request: NextRequest) {
       fetchedAt: Date.now(),
     };
 
-    cache.set(cacheKey, result);
+    setCachedValue(cacheKey, result);
 
     return NextResponse.json(result);
   } catch {

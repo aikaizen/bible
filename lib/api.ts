@@ -18,8 +18,8 @@ export function handleRouteError(error: unknown) {
     return badRequest(error.message, error.status);
   }
 
-  const message = error instanceof Error ? error.message : "Unexpected server error";
-  return badRequest(message, 500);
+  console.error("Unhandled route error", error);
+  return badRequest("Unexpected server error", 500);
 }
 
 export async function parseBody<T>(request: Request): Promise<T> {

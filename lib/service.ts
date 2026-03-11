@@ -2,9 +2,10 @@ import crypto from "node:crypto";
 import { PoolClient } from "pg";
 
 import { dbQuery, dbQueryOne, withTransaction } from "./db";
+import { handleDeaconMention } from "./deacon";
+import { sendEmail, NotificationType, getEmailPreferenceColumn, EmailUser } from "./email";
 import { isValidReference, normalizeReference } from "./reference";
 import { pickGlobalSeedsForDate, pickSeedPassages } from "./seed-passages";
-import { sendEmail, NotificationType, getEmailPreferenceColumn, EmailUser } from "./email";
 
 export type ReadStatus = "NOT_MARKED" | "PLANNED" | "READ";
 export type TiePolicy = "ADMIN_PICK" | "RANDOM" | "EARLIEST";
@@ -65,9 +66,28 @@ type ReadingItemRow = {
 };
 
 let randomSource: () => number = () => Math.random();
+const DEFAULT_GROUP_TIMEZONE = "America/New_York";
 
 function nowIso(): string {
   return new Date().toISOString();
+}
+
+function isValidTimeZone(timeZone: string): boolean {
+  try {
+    // Throws if timezone is not a valid IANA identifier.
+    new Intl.DateTimeFormat("en-US", { timeZone }).format();
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+function normalizeGroupTimeZone(timeZone?: string): string {
+  const normalized = (timeZone ?? DEFAULT_GROUP_TIMEZONE).trim();
+  if (!normalized || normalized.length > 100 || !isValidTimeZone(normalized)) {
+    throw new ServiceError("Invalid timezone", 422);
+  }
+  return normalized;
 }
 
 function mapRoleWeight(role: GroupRole): number {
@@ -127,7 +147,11 @@ async function requireAdmin(groupId: string, userId: string, client?: PoolClient
 
 async function notifyGroupMembers(
   groupId: string,
+<<<<<<< HEAD
   type: NotificationType,
+=======
+  type: "VOTING_OPENED" | "VOTING_REMINDER" | "WINNER_SELECTED" | "COMMENT_REPLY" | "MENTION" | "PASSAGE_READ",
+>>>>>>> 9a63b3f (feat: add Deacon AI assistant, super admin, email notifications, PASSAGE_READ notifications)
   text: string,
   metadata: Record<string, unknown>,
   actorUserId?: string,
@@ -175,7 +199,11 @@ async function notifyGroupMembers(
 
 async function notifyUsers(
   userIds: string[],
+<<<<<<< HEAD
   type: NotificationType,
+=======
+  type: "VOTING_OPENED" | "VOTING_REMINDER" | "WINNER_SELECTED" | "COMMENT_REPLY" | "MENTION" | "PASSAGE_READ",
+>>>>>>> 9a63b3f (feat: add Deacon AI assistant, super admin, email notifications, PASSAGE_READ notifications)
   text: string,
   metadata: Record<string, unknown>,
   client?: PoolClient,
@@ -215,6 +243,96 @@ async function notifyUsers(
       mentionerName: metadata.mentionerName as string | undefined,
     });
   }
+}
+
+function getAppUrl(): string {
+  return process.env.NEXT_PUBLIC_APP_URL?.trim() || "http://localhost:3000";
+}
+
+function getVerseLabel(startVerse: number, endVerse: number): string {
+  return startVerse === endVerse ? `verse ${startVerse}` : `verses ${startVerse}-${endVerse}`;
+}
+
+async function sendVerseCommentEmails(params: {
+  readingItemId: string;
+  actorUserId: string;
+  startVerse: number;
+  endVerse: number;
+}): Promise<void> {
+  const [actor, readingItem] = await Promise.all([
+    dbQueryOne<{ name: string }>(`SELECT name FROM users WHERE id = $1`, [params.actorUserId]),
+    dbQueryOne<{ reference: string; group_id: string }>(
+      `SELECT ri.reference, w.group_id
+       FROM reading_items ri
+       JOIN weeks w ON w.id = ri.week_id
+       WHERE ri.id = $1`,
+      [params.readingItemId],
+    ),
+  ]);
+  if (!actor || !readingItem) return;
+
+  const recipients = await dbQuery<{ email: string; name: string }>(
+    `SELECT u.email, u.name
+     FROM group_members gm
+     JOIN users u ON u.id = gm.user_id
+     WHERE gm.group_id = $1
+       AND gm.user_id <> $2
+       AND u.is_bot = FALSE`,
+    [readingItem.group_id, params.actorUserId],
+  );
+  if (recipients.length === 0) return;
+
+  const verseLabel = getVerseLabel(params.startVerse, params.endVerse);
+  const appUrl = getAppUrl();
+
+  await Promise.all(
+    recipients.map((recipient) =>
+      sendEmail({
+        to: recipient.email,
+        subject: `New verse comment on ${readingItem.reference}`,
+        text: `${actor.name} commented on ${verseLabel} in ${readingItem.reference}.\n\nOpen the app: ${appUrl}`,
+      }),
+    ),
+  );
+}
+
+async function sendVerseReplyEmails(params: {
+  annotationId: string;
+  readingItemId: string;
+  actorUserId: string;
+  startVerse: number;
+  endVerse: number;
+}): Promise<void> {
+  const [actor, readingItem] = await Promise.all([
+    dbQueryOne<{ name: string }>(`SELECT name FROM users WHERE id = $1`, [params.actorUserId]),
+    dbQueryOne<{ reference: string }>(`SELECT reference FROM reading_items WHERE id = $1`, [params.readingItemId]),
+  ]);
+  if (!actor || !readingItem) return;
+
+  const recipients = await dbQuery<{ email: string; name: string }>(
+    `SELECT DISTINCT u.email, u.name
+     FROM annotation_replies ar
+     JOIN users u ON u.id = ar.author_id
+     WHERE ar.annotation_id = $1
+       AND ar.deleted_at IS NULL
+       AND ar.author_id <> $2
+       AND u.is_bot = FALSE`,
+    [params.annotationId, params.actorUserId],
+  );
+  if (recipients.length === 0) return;
+
+  const verseLabel = getVerseLabel(params.startVerse, params.endVerse);
+  const appUrl = getAppUrl();
+
+  await Promise.all(
+    recipients.map((recipient) =>
+      sendEmail({
+        to: recipient.email,
+        subject: `Reply in a verse thread you joined`,
+        text: `${actor.name} replied on ${verseLabel} in ${readingItem.reference}.\n\nOpen the app: ${appUrl}`,
+      }),
+    ),
+  );
 }
 
 async function getCurrentWeekMeta(groupId: string): Promise<{ startDate: string; closeAt: string }> {
@@ -828,6 +946,7 @@ export async function getGroupSnapshot(groupId: string, userId: string) {
       `SELECT token
        FROM invites
        WHERE group_id = $1
+         AND status = 'pending'
          AND (expires_at IS NULL OR expires_at > NOW())
        ORDER BY created_at DESC
        LIMIT 1`,
@@ -956,15 +1075,20 @@ export async function getGroupSnapshot(groupId: string, userId: string) {
       commentsCount: Number(item.comments_count),
       readCount: Number(item.read_count),
     })),
-    pendingInvites: pendingInvites.map((inv) => ({
-      id: inv.id,
-      token: inv.token,
-      recipientName: inv.recipient_name,
-      recipientContact: inv.recipient_contact,
-      createdBy: inv.created_by,
-      creatorName: inv.creator_name,
-      createdAt: inv.created_at,
-    })),
+    pendingInvites: pendingInvites.map((inv) => {
+      const canViewSensitiveInviteData =
+        mapRoleWeight(membership.role) >= mapRoleWeight("ADMIN") ||
+        inv.created_by === userId;
+      return {
+        id: inv.id,
+        token: canViewSensitiveInviteData ? inv.token : null,
+        recipientName: inv.recipient_name,
+        recipientContact: canViewSensitiveInviteData ? inv.recipient_contact : null,
+        createdBy: inv.created_by,
+        creatorName: inv.creator_name,
+        createdAt: inv.created_at,
+      };
+    }),
   };
 }
 
@@ -1035,7 +1159,11 @@ export async function removeProposal(params: { groupId: string; userId: string; 
 
     if (Number(remaining?.count ?? 0) === 0) {
       const group = await getGroup(params.groupId);
-      await insertSeedProposals(params.groupId, proposal.week_id, group.owner_id, 1);
+      const week = await dbQueryOne<{ start_date: string }>(
+        `SELECT start_date::text FROM weeks WHERE id = $1`,
+        [proposal.week_id],
+      );
+      await insertSeedProposals(params.groupId, proposal.week_id, group.owner_id, 1, week?.start_date);
     }
 
     await ensureWeekReadingItem(proposal.week_id);
@@ -1094,6 +1222,72 @@ export async function castVote(params: { groupId: string; userId: string; propos
   return { ok: true, autoResolved: false };
 }
 
+async function notifyGroupsOnRead(userId: string, readingItemId: string): Promise<void> {
+  // 1. Get the reading item's reference and source group
+  const item = await dbQueryOne<{ reference: string; group_id: string; week_status: WeekStatus }>(
+    `SELECT ri.reference, w.group_id, w.status AS week_status
+     FROM reading_items ri
+     JOIN weeks w ON w.id = ri.week_id
+     WHERE ri.id = $1`,
+    [readingItemId],
+  );
+  if (!item) return;
+
+  // 2. Get the user's name
+  const user = await dbQueryOne<{ name: string }>(`SELECT name FROM users WHERE id = $1`, [userId]);
+  if (!user) return;
+
+  // 3. Get all groups the user is in
+  const memberships = await dbQuery<{ group_id: string }>(
+    `SELECT group_id FROM group_members WHERE user_id = $1`,
+    [userId],
+  );
+
+  for (const membership of memberships) {
+    const gid = membership.group_id;
+
+    if (gid === item.group_id) {
+      // Source group: encourage other members
+      await notifyGroupMembers(
+        gid,
+        "PASSAGE_READ",
+        `${user.name} read ${item.reference} — have you read it yet?`,
+        { type: "current", groupId: gid, readingItemId, reference: item.reference },
+        userId,
+      );
+    } else {
+      // Cross-group: check if voting is open
+      const otherWeek = await getActiveWeek(gid);
+      if (!otherWeek || otherWeek.status !== "VOTING_OPEN" || isPast(otherWeek.voting_close_at)) continue;
+
+      // Check if reference is already the current reading or already proposed
+      const [existingReading, existingProposal] = await Promise.all([
+        dbQueryOne<{ id: string }>(
+          `SELECT ri.id FROM reading_items ri
+           JOIN weeks w ON w.id = ri.week_id
+           WHERE w.group_id = $1 AND ri.reference = $2`,
+          [gid, item.reference],
+        ),
+        dbQueryOne<{ id: string }>(
+          `SELECT id FROM proposals
+           WHERE week_id = $1 AND reference = $2 AND deleted_at IS NULL`,
+          [otherWeek.id, item.reference],
+        ),
+      ]);
+
+      if (existingReading || existingProposal) continue;
+
+      await notifyGroupMembers(
+        gid,
+        "PASSAGE_READ",
+        `${user.name} read ${item.reference}. Add it to your group's list for this week?`,
+        { type: "suggest", groupId: gid, reference: item.reference },
+        userId,
+      );
+    }
+  }
+}
+
 export async function setReadMark(params: {
   readingItemId: string;
   userId: string;
@@ -1125,6 +1319,11 @@ export async function setReadMark(params: {
     [params.userId, params.readingItemId, params.status],
   );
 
+  // Fire-and-forget: notify groups when user marks as READ
+  if (params.status === "READ") {
+    void notifyGroupsOnRead(params.userId, params.readingItemId).catch(() => {});
+  }
+
   return { ok: true };
 }
 
@@ -1133,7 +1332,7 @@ function extractMentionHandles(text: string): string[] {
   return Array.from(new Set(matches.map((token) => token.slice(1).toLowerCase())));
 }
 
-export async function getComments(readingItemId: string, userId: string) {
+export async function getComments(readingItemId: string, userId: string, isSuperAdmin = false) {
   const access = await dbQueryOne<{ group_id: string }>(
     `SELECT w.group_id
      FROM reading_items ri
@@ -1153,11 +1352,12 @@ export async function getComments(readingItemId: string, userId: string) {
     parent_id: string | null;
     author_id: string;
     author_name: string;
+    is_bot: boolean;
     text: string;
     created_at: string;
     updated_at: string;
   }>(
-    `SELECT c.id, c.parent_id, c.author_id, u.name AS author_name, c.text, c.created_at::text, c.updated_at::text
+    `SELECT c.id, c.parent_id, c.author_id, u.name AS author_name, u.is_bot, c.text, c.created_at::text, c.updated_at::text
      FROM comments c
      JOIN users u ON u.id = c.author_id
      WHERE c.reading_item_id = $1
@@ -1172,22 +1372,24 @@ export async function getComments(readingItemId: string, userId: string) {
       id: comment.id,
       authorId: comment.author_id,
       authorName: comment.author_name,
+      isBot: comment.is_bot,
       text: comment.text,
       createdAt: comment.created_at,
       updatedAt: comment.updated_at,
       canEdit: comment.author_id === userId && Date.now() - new Date(comment.created_at).getTime() <= 5 * 60 * 1000,
-      canDelete: comment.author_id === userId,
+      canDelete: comment.author_id === userId || isSuperAdmin,
       replies: comments
         .filter((reply) => reply.parent_id === comment.id)
         .map((reply) => ({
           id: reply.id,
           authorId: reply.author_id,
           authorName: reply.author_name,
+          isBot: reply.is_bot,
           text: reply.text,
           createdAt: reply.created_at,
           updatedAt: reply.updated_at,
           canEdit: reply.author_id === userId && Date.now() - new Date(reply.created_at).getTime() <= 5 * 60 * 1000,
-          canDelete: reply.author_id === userId,
+          canDelete: reply.author_id === userId || isSuperAdmin,
         })),
     }));
 
@@ -1208,7 +1410,7 @@ export async function createComment(params: {
     throw new ServiceError("Comment exceeds 500 characters", 422);
   }
 
-  await withTransaction(async (client) => {
+  const txResult = await withTransaction(async (client) => {
     const access = await dbQueryOne<{ group_id: string }>(
       `SELECT w.group_id
        FROM reading_items ri
@@ -1316,7 +1518,33 @@ export async function createComment(params: {
         client,
       );
     }
+
+    return { insertedId: inserted?.id ?? null, mentionHandles };
   });
+
+  // Fire-and-forget: trigger Deacon AI if @deacon was mentioned
+  if (txResult.mentionHandles.includes("deacon") && txResult.insertedId) {
+    const reading = await dbQueryOne<{ reference: string }>(
+      `SELECT ri.reference FROM reading_items ri WHERE ri.id = $1`,
+      [params.readingItemId],
+    );
+    const author = await dbQueryOne<{ name: string }>(
+      `SELECT name FROM users WHERE id = $1`,
+      [params.userId],
+    );
+    if (reading && author) {
+      // For top-level comments, Deacon replies to the comment itself
+      // For replies, Deacon replies to the same parent thread
+      const parentForDeacon = params.parentId ?? txResult.insertedId;
+      void handleDeaconMention({
+        readingItemId: params.readingItemId,
+        parentCommentId: parentForDeacon,
+        triggerText: text,
+        triggerAuthorName: author.name,
+        passageReference: reading.reference,
+      }).catch(() => {});
+    }
+  }
 
   return { ok: true };
 }
@@ -1360,7 +1588,7 @@ export async function editComment(params: { commentId: string; userId: string; t
   return { ok: true };
 }
 
-export async function deleteComment(params: { commentId: string; userId: string }) {
+export async function deleteComment(params: { commentId: string; userId: string; isSuperAdmin?: boolean }) {
   const comment = await dbQueryOne<{ author_id: string; deleted_at: string | null }>(
     `SELECT author_id, deleted_at::text
      FROM comments
@@ -1371,7 +1599,7 @@ export async function deleteComment(params: { commentId: string; userId: string 
   if (!comment || comment.deleted_at) {
     throw new ServiceError("Comment not found", 404);
   }
-  if (comment.author_id !== params.userId) {
+  if (comment.author_id !== params.userId && !params.isSuperAdmin) {
     throw new ServiceError("Only the author can delete this comment", 403);
   }
 
@@ -1459,6 +1687,7 @@ export async function createGroup(params: {
   if (!name) {
     throw new ServiceError("Group name is required", 422);
   }
+  const timezone = normalizeGroupTimeZone(params.timezone);
 
   const user = await dbQueryOne<{ id: string }>(`SELECT id FROM users WHERE id = $1`, [params.ownerId]);
   if (!user) {
@@ -1474,7 +1703,7 @@ export async function createGroup(params: {
       `INSERT INTO groups(name, timezone, owner_id, tie_policy, live_tally, voting_duration_hours)
        VALUES ($1, $2, $3, $4, $5, $6)
        RETURNING id`,
-      [name, params.timezone || "America/New_York", params.ownerId, params.tiePolicy ?? "ADMIN_PICK", params.liveTally ?? true, votingHours],
+      [name, timezone, params.ownerId, params.tiePolicy ?? "ADMIN_PICK", params.liveTally ?? true, votingHours],
       client,
     );
 
@@ -1530,7 +1759,8 @@ export async function createPersonalInvite(params: {
 }
 
 export async function getPendingInvites(groupId: string, userId: string) {
-  await requireMembership(groupId, userId);
+  const member = await requireMembership(groupId, userId);
+  const isAdmin = mapRoleWeight(member.role) >= mapRoleWeight("ADMIN");
 
   const rows = await dbQuery<{
     id: string;
@@ -1555,9 +1785,9 @@ export async function getPendingInvites(groupId: string, userId: string) {
 
   return rows.map((r) => ({
     id: r.id,
-    token: r.token,
+    token: isAdmin || r.created_by === userId ? r.token : null,
     recipientName: r.recipient_name,
-    recipientContact: r.recipient_contact,
+    recipientContact: isAdmin || r.created_by === userId ? r.recipient_contact : null,
     createdBy: r.created_by,
     creatorName: r.creator_name,
     createdAt: r.created_at,
@@ -1599,40 +1829,54 @@ export async function getInviteByToken(token: string) {
      JOIN users u ON u.id = i.created_by
      WHERE i.token = $1
        AND (i.expires_at IS NULL OR i.expires_at > NOW())
-       AND i.status != 'cancelled'`,
+       AND i.status = 'pending'
+       AND (i.recipient_name IS NULL OR i.accepted_by IS NULL)`,
     [token],
   );
 }
 
 export async function joinGroupByInvite(params: { token: string; userId: string }) {
-  const invite = await dbQueryOne<{ group_id: string; id: string; recipient_name: string | null }>(
-    `SELECT group_id, id, recipient_name
-     FROM invites
-     WHERE token = $1
-       AND (expires_at IS NULL OR expires_at > NOW())`,
-    [params.token],
-  );
-
-  if (!invite) {
-    throw new ServiceError("Invite is invalid or expired", 404);
-  }
-
-  await dbQuery(
-    `INSERT INTO group_members(group_id, user_id, role)
-     VALUES ($1, $2, 'MEMBER')
-     ON CONFLICT (group_id, user_id) DO NOTHING`,
-    [invite.group_id, params.userId],
-  );
-
-  // Mark personal invites as accepted
-  if (invite.recipient_name) {
-    await dbQuery(
-      `UPDATE invites SET status = 'accepted', accepted_by = $1 WHERE id = $2 AND status = 'pending'`,
-      [params.userId, invite.id],
+  return withTransaction(async (client) => {
+    const invite = await dbQueryOne<{ group_id: string; id: string; recipient_name: string | null }>(
+      `SELECT group_id, id, recipient_name
+       FROM invites
+       WHERE token = $1
+         AND (expires_at IS NULL OR expires_at > NOW())
+         AND status = 'pending'
+         AND (recipient_name IS NULL OR accepted_by IS NULL)
+       FOR UPDATE`,
+      [params.token],
+      client,
     );
-  }
 
-  return { groupId: invite.group_id };
+    if (!invite) {
+      throw new ServiceError("Invite is invalid, expired, or already used", 404);
+    }
+
+    await dbQuery(
+      `INSERT INTO group_members(group_id, user_id, role)
+       VALUES ($1, $2, 'MEMBER')
+       ON CONFLICT (group_id, user_id) DO NOTHING`,
+      [invite.group_id, params.userId],
+      client,
+    );
+
+    // Personal invites are consumed once redeemed.
+    if (invite.recipient_name) {
+      await dbQuery(
+        `UPDATE invites
+         SET status = 'accepted',
+             accepted_by = $1
+         WHERE id = $2
+           AND status = 'pending'
+           AND accepted_by IS NULL`,
+        [params.userId, invite.id],
+        client,
+      );
+    }
+
+    return { groupId: invite.group_id };
+  });
 }
 
 // eslint-disable-next-line @typescript-eslint/no-unused-vars
@@ -1799,11 +2043,10 @@ export async function removeMember(params: {
   groupId: string;
   userId: string;
   targetUserId: string;
+  isSuperAdmin?: boolean;
 }) {
-  await requireAdmin(params.groupId, params.userId);
-
-  if (params.targetUserId === params.userId) {
-    throw new ServiceError("You cannot remove yourself", 400);
+  if (!params.isSuperAdmin) {
+    await requireAdmin(params.groupId, params.userId);
   }
 
   const target = await getMembership(params.groupId, params.targetUserId);
@@ -1811,20 +2054,85 @@ export async function removeMember(params: {
     throw new ServiceError("User is not a member of this group", 404);
   }
 
-  // Prevent removing the owner
-  if (target.role === "OWNER") {
-    throw new ServiceError("Cannot remove the group owner", 403);
-  }
-
-  // Admins can only be removed by the owner
-  const actor = await requireMembership(params.groupId, params.userId);
-  if (target.role === "ADMIN" && actor.role !== "OWNER") {
-    throw new ServiceError("Only the owner can remove admins", 403);
+  if (!params.isSuperAdmin) {
+    if (params.targetUserId === params.userId) {
+      throw new ServiceError("You cannot remove yourself", 400);
+    }
+    if (target.role === "OWNER") {
+      throw new ServiceError("Cannot remove the group owner", 403);
+    }
+    const actor = await requireMembership(params.groupId, params.userId);
+    if (target.role === "ADMIN" && actor.role !== "OWNER") {
+      throw new ServiceError("Only the owner can remove admins", 403);
+    }
   }
 
   await dbQuery(
     `DELETE FROM group_members WHERE group_id = $1 AND user_id = $2`,
     [params.groupId, params.targetUserId],
+  );
+
+  return { ok: true };
+}
+
+export async function addMemberToGroup(params: {
+  groupId: string;
+  targetUserId: string;
+  role?: GroupRole;
+  actorUserId: string;
+  isSuperAdmin?: boolean;
+}) {
+  if (!params.isSuperAdmin) {
+    throw new ServiceError("Super admin access required", 403);
+  }
+
+  await getGroup(params.groupId); // verify group exists
+
+  const user = await dbQueryOne<{ id: string }>(`SELECT id FROM users WHERE id = $1`, [params.targetUserId]);
+  if (!user) throw new ServiceError("User not found", 404);
+
+  await dbQuery(
+    `INSERT INTO group_members(group_id, user_id, role)
+     VALUES ($1, $2, $3::group_role)
+     ON CONFLICT (group_id, user_id) DO NOTHING`,
+    [params.groupId, params.targetUserId, params.role ?? "MEMBER"],
+  );
+
+  return { ok: true };
+}
+
+export async function changeMemberRole(params: {
+  groupId: string;
+  targetUserId: string;
+  newRole: GroupRole;
+  actorUserId: string;
+  isSuperAdmin?: boolean;
+}) {
+  if (!params.isSuperAdmin) {
+    throw new ServiceError("Super admin access required", 403);
+  }
+
+  const target = await getMembership(params.groupId, params.targetUserId);
+  if (!target) throw new ServiceError("User is not a member of this group", 404);
+
+  // If promoting to OWNER, demote current owner to ADMIN
+  if (params.newRole === "OWNER") {
+    await dbQuery(
+      `UPDATE group_members SET role = 'ADMIN'
+       WHERE group_id = $1 AND role = 'OWNER'`,
+      [params.groupId],
+    );
+    // Also update the groups.owner_id
+    await dbQuery(
+      `UPDATE groups SET owner_id = $1 WHERE id = $2`,
+      [params.targetUserId, params.groupId],
+    );
+  }
+
+  await dbQuery(
+    `UPDATE group_members SET role = $1::group_role
+     WHERE group_id = $2 AND user_id = $3`,
+    [params.newRole, params.groupId, params.targetUserId],
   );
 
   return { ok: true };
@@ -1843,6 +2151,7 @@ export async function getUserGroups(userId: string) {
          SELECT i.token
          FROM invites i
          WHERE i.group_id = g.id
+           AND i.status = 'pending'
            AND (i.expires_at IS NULL OR i.expires_at > NOW())
          ORDER BY i.created_at DESC
          LIMIT 1
@@ -1855,7 +2164,14 @@ export async function getUserGroups(userId: string) {
   );
 }
 
-export async function getBootstrapData() {
+export async function getBootstrapData(params?: { isSuperAdmin?: boolean }) {
+  if (!params?.isSuperAdmin) {
+    return {
+      now: nowIso(),
+      users: [],
+    };
+  }
+
   const users = await dbQuery<{
     id: string;
     name: string;
@@ -1929,7 +2245,7 @@ async function requireReadingAccess(
   return { groupId: access.group_id };
 }
 
-export async function getAnnotations(readingItemId: string, userId: string) {
+export async function getAnnotations(readingItemId: string, userId: string, isSuperAdmin = false) {
   await requireReadingAccess(readingItemId, userId);
 
   const annotations = await dbQuery<{
@@ -1958,10 +2274,11 @@ export async function getAnnotations(readingItemId: string, userId: string) {
         annotation_id: string;
         author_id: string;
         author_name: string;
+        is_bot: boolean;
         text: string;
         created_at: string;
       }>(
-        `SELECT ar.id, ar.annotation_id, ar.author_id, u.name AS author_name,
+        `SELECT ar.id, ar.annotation_id, ar.author_id, u.name AS author_name, u.is_bot,
                 ar.text, ar.created_at::text
          FROM annotation_replies ar
          JOIN users u ON u.id = ar.author_id
@@ -1980,16 +2297,17 @@ export async function getAnnotations(readingItemId: string, userId: string) {
     endVerse: a.end_verse,
     text: a.text,
     createdAt: a.created_at,
-    canDelete: a.author_id === userId,
+    canDelete: a.author_id === userId || isSuperAdmin,
     replies: replies
       .filter((r) => r.annotation_id === a.id)
       .map((r) => ({
         id: r.id,
         authorId: r.author_id,
         authorName: r.author_name,
+        isBot: r.is_bot,
         text: r.text,
         createdAt: r.created_at,
-        canDelete: r.author_id === userId,
+        canDelete: r.author_id === userId || isSuperAdmin,
       })),
   }));
 }
@@ -2017,6 +2335,13 @@ export async function createAnnotation(params: {
     [params.readingItemId, params.userId, params.startVerse, params.endVerse, text],
   );
 
+  await sendVerseCommentEmails({
+    readingItemId: params.readingItemId,
+    actorUserId: params.userId,
+    startVerse: params.startVerse,
+    endVerse: params.endVerse,
+  });
+
   return { annotationId: annotation?.id ?? null };
 }
 
@@ -2029,8 +2354,13 @@ export async function createAnnotationReply(params: {
   if (!text) throw new ServiceError("Reply cannot be empty", 422);
   if (text.length > 500) throw new ServiceError("Reply exceeds 500 characters", 422);
 
-  const annotation = await dbQueryOne<{ id: string; reading_item_id: string }>(
-    `SELECT a.id, a.reading_item_id
+  const annotation = await dbQueryOne<{
+    id: string;
+    reading_item_id: string;
+    start_verse: number;
+    end_verse: number;
+  }>(
+    `SELECT a.id, a.reading_item_id, a.start_verse, a.end_verse
      FROM annotations a
      WHERE a.id = $1
        AND a.deleted_at IS NULL`,
@@ -2047,17 +2377,48 @@ export async function createAnnotationReply(params: {
     [params.annotationId, params.userId, text],
   );
 
+  await sendVerseReplyEmails({
+    annotationId: params.annotationId,
+    readingItemId: annotation.reading_item_id,
+    actorUserId: params.userId,
+    startVerse: annotation.start_verse,
+    endVerse: annotation.end_verse,
+  });
+
+  // Fire-and-forget: trigger Deacon AI if @deacon was mentioned
+  const mentionHandles = extractMentionHandles(text);
+  if (mentionHandles.includes("deacon")) {
+    const reading = await dbQueryOne<{ reference: string }>(
+      `SELECT ri.reference FROM reading_items ri WHERE ri.id = $1`,
+      [annotation.reading_item_id],
+    );
+    const author = await dbQueryOne<{ name: string }>(
+      `SELECT name FROM users WHERE id = $1`,
+      [params.userId],
+    );
+    if (reading && author) {
+      void handleDeaconMention({
+        readingItemId: annotation.reading_item_id,
+        annotationId: params.annotationId,
+        triggerText: text,
+        triggerAuthorName: author.name,
+        passageReference: reading.reference,
+        verseRange: { start: annotation.start_verse, end: annotation.end_verse },
+      }).catch(() => {});
+    }
+  }
+
   return { replyId: reply?.id ?? null };
 }
 
-export async function deleteAnnotation(params: { annotationId: string; userId: string }) {
+export async function deleteAnnotation(params: { annotationId: string; userId: string; isSuperAdmin?: boolean }) {
   const annotation = await dbQueryOne<{ author_id: string; deleted_at: string | null }>(
     `SELECT author_id, deleted_at::text FROM annotations WHERE id = $1`,
     [params.annotationId],
   );
 
   if (!annotation || annotation.deleted_at) throw new ServiceError("Annotation not found", 404);
-  if (annotation.author_id !== params.userId) {
+  if (annotation.author_id !== params.userId && !params.isSuperAdmin) {
     throw new ServiceError("Only the author can delete this annotation", 403);
   }
 
@@ -2065,14 +2426,14 @@ export async function deleteAnnotation(params: { annotationId: string; userId: s
   return { ok: true };
 }
 
-export async function deleteAnnotationReply(params: { replyId: string; userId: string }) {
+export async function deleteAnnotationReply(params: { replyId: string; userId: string; isSuperAdmin?: boolean }) {
   const reply = await dbQueryOne<{ author_id: string; deleted_at: string | null }>(
     `SELECT author_id, deleted_at::text FROM annotation_replies WHERE id = $1`,
     [params.replyId],
   );
 
   if (!reply || reply.deleted_at) throw new ServiceError("Reply not found", 404);
-  if (reply.author_id !== params.userId) {
+  if (reply.author_id !== params.userId && !params.isSuperAdmin) {
     throw new ServiceError("Only the author can delete this reply", 403);
   }
 
@@ -2082,7 +2443,7 @@ export async function deleteAnnotationReply(params: { replyId: string; userId: s
 
 /* ─── Proposal Comments ─── */
 
-export async function getProposalComments(proposalId: string, userId: string) {
+export async function getProposalComments(proposalId: string, userId: string, isSuperAdmin = false) {
   // Verify access: user must be in the group that owns this proposal
   const access = await dbQueryOne<{ group_id: string }>(
     `SELECT w.group_id
@@ -2124,7 +2485,7 @@ export async function getProposalComments(proposalId: string, userId: string) {
     authorName: c.author_name,
     text: c.text,
     createdAt: c.created_at,
-    canDelete: c.author_id === userId,
+    canDelete: c.author_id === userId || isSuperAdmin,
   }));
 }
 
@@ -2330,14 +2691,14 @@ export async function getUserCommentHistory(userId: string) {
   }));
 }
 
-export async function deleteProposalComment(params: { commentId: string; userId: string }) {
+export async function deleteProposalComment(params: { commentId: string; userId: string; isSuperAdmin?: boolean }) {
   const comment = await dbQueryOne<{ author_id: string; deleted_at: string | null }>(
     `SELECT author_id, deleted_at::text FROM proposal_comments WHERE id = $1`,
     [params.commentId],
   );
 
   if (!comment || comment.deleted_at) throw new ServiceError("Comment not found", 404);
-  if (comment.author_id !== params.userId) {
+  if (comment.author_id !== params.userId && !params.isSuperAdmin) {
     throw new ServiceError("Only the author can delete this comment", 403);
   }
 

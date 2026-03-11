@@ -9,7 +9,7 @@ export async function DELETE(
   try {
     const user = await getAuthUser();
     const { annotationId } = await context.params;
-    const data = await deleteAnnotation({ annotationId, userId: user.id });
+    const data = await deleteAnnotation({ annotationId, userId: user.id, isSuperAdmin: user.isSuperAdmin });
     return ok(data);
   } catch (error) {
     return handleRouteError(error);

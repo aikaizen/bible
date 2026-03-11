@@ -9,7 +9,7 @@ export async function GET(
   try {
     const user = await getAuthUser();
     const { readingItemId } = await context.params;
-    const annotations = await getAnnotations(readingItemId, user.id);
+    const annotations = await getAnnotations(readingItemId, user.id, user.isSuperAdmin);
     return ok({ annotations });
   } catch (error) {
     return handleRouteError(error);
