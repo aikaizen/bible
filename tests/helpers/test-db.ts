@@ -89,7 +89,9 @@ CREATE TABLE proposals (
   note TEXT NOT NULL DEFAULT '',
   created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
   deleted_at TIMESTAMPTZ,
-  is_seed BOOLEAN NOT NULL DEFAULT FALSE
+  is_seed BOOLEAN NOT NULL DEFAULT FALSE,
+  archived_at TIMESTAMPTZ,
+  archived_by UUID
 );
 
 CREATE TABLE votes (
@@ -98,12 +100,12 @@ CREATE TABLE votes (
   proposal_id UUID NOT NULL REFERENCES proposals(id) ON DELETE CASCADE,
   user_id UUID NOT NULL REFERENCES users(id) ON DELETE CASCADE,
   created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-  UNIQUE (week_id, user_id)
+  UNIQUE (proposal_id, user_id)
 );
 
 CREATE TABLE reading_items (
   id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
-  week_id UUID NOT NULL UNIQUE REFERENCES weeks(id) ON DELETE CASCADE,
+  week_id UUID NOT NULL REFERENCES weeks(id) ON DELETE CASCADE,
   proposal_id UUID REFERENCES proposals(id) ON DELETE SET NULL,
   reference TEXT NOT NULL,
   created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
@@ -150,6 +152,8 @@ CREATE TABLE annotations (
   author_id UUID NOT NULL REFERENCES users(id) ON DELETE CASCADE,
   start_verse INT NOT NULL,
   end_verse INT NOT NULL,
+  start_offset INT,
+  end_offset INT,
   text VARCHAR(500) NOT NULL,
   created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
   deleted_at TIMESTAMPTZ
