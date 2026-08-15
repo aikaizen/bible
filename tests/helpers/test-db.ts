@@ -209,11 +209,15 @@ export async function createTestDb(): Promise<TestDb> {
       return sql;
     }
 
+    // pg-mem cannot parse `date_trunc('week', ...) AT TIME ZONE ...`, so the
+    // calendar-week boundary query (getCurrentWeekMeta) is stubbed. The stub
+    // stands in for "start of the next calendar week in the group's timezone":
+    // always strictly in the future and at most one week out.
     if (sql.includes("date_trunc('week'") && sql.includes("FROM groups g")) {
       return `
         SELECT
           CURRENT_DATE AS start_date,
-          (NOW() + interval '200 hour') AS close_at
+          (NOW() + interval '168 hour') AS close_at
         FROM groups g
         WHERE g.id = $1
       `;
@@ -237,7 +241,6 @@ export async function createTestDb(): Promise<TestDb> {
       .replace(/'VOTING_OPEN'(?!::week_status)/g, "'VOTING_OPEN'::week_status")
       .replace(/'RESOLVED'(?!::week_status)/g, "'RESOLVED'::week_status")
       .replace(/'PENDING_MANUAL'(?!::week_status)/g, "'PENDING_MANUAL'::week_status")
-      .replace(/NOW\(\) \+ \(interval '1 hour' \* \$2::int\)/g, "NOW() + interval '168 hour'")
       .replace(
         /COUNT\(DISTINCT CASE WHEN rm\.status = 'READ' THEN rm\.user_id END\)/g,
         "COUNT(DISTINCT rm.user_id)",

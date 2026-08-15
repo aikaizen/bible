@@ -79,8 +79,7 @@ type BootstrapPayload = { now: string; users: User[] };
 type Snapshot = {
   group: {
     id: string; name: string; timezone: string;
-    tiePolicy: "ADMIN_PICK" | "RANDOM" | "EARLIEST";
-    liveTally: boolean; votingDurationHours: number;
+    votingDurationHours: number;
     inviteToken: string | null;
   };
   week: {
@@ -114,6 +113,39 @@ type Snapshot = {
     weekId: string; startDate: string; reference: string;
     commentsCount: number; readCount: number;
   }>;
+};
+
+type HistoryPassage = {
+  readingItemId: string;
+  proposalId: string | null;
+  reference: string;
+  voteCount: number;
+  commentsCount: number;
+  readCount: number;
+};
+
+type HistoryWeek = {
+  weekId: string;
+  startDate: string;
+  passages: HistoryPassage[];
+};
+
+type ArchivedPassage = {
+  id: string;
+  reference: string;
+  note: string;
+  proposerId: string;
+  proposerName: string;
+  createdAt: string;
+  isSeed: boolean;
+  voteCount: number;
+  voters: Array<{ id: string; name: string }>;
+  readingItemId: string | null;
+};
+
+type ArchivedWeek = {
+  week: { id: string; startDate: string; status: string };
+  passages: ArchivedPassage[];
   pendingInvites: Array<{
     id: string; token: string | null; recipientName: string;
     recipientContact: string | null; createdBy: string;
@@ -1699,30 +1731,6 @@ export default function Home() {
                   <option value={168}>168 hours (full week)</option>
                 </select>
 
-                <div style={{ fontSize: 12, color: "var(--text-secondary)", marginTop: 8 }}>
-                  Tie-Breaking Policy
-                </div>
-                <select
-                  className="drawer-select"
-                  value={snapshot.group.tiePolicy}
-                  onChange={(e) => onUpdateSettings("tiePolicy", e.target.value)}
-                >
-                  <option value="ADMIN_PICK">Admin picks winner</option>
-                  <option value="RANDOM">Random selection</option>
-                  <option value="EARLIEST">Earliest proposal wins</option>
-                </select>
-
-                <div style={{ fontSize: 12, color: "var(--text-secondary)", marginTop: 8 }}>
-                  Show Live Vote Tally
-                </div>
-                <select
-                  className="drawer-select"
-                  value={snapshot.group.liveTally ? "true" : "false"}
-                  onChange={(e) => onUpdateSettings("liveTally", e.target.value === "true")}
-                >
-                  <option value="true">Yes</option>
-                  <option value="false">No (hidden until close)</option>
-                </select>
               </div>
             )}
           </div>
@@ -1864,9 +1872,7 @@ export default function Home() {
                             )}
                           </div>
                         </div>
-                        <div className="vote-count">
-                          {snapshot.group.liveTally ? p.voteCount : "\u2022"}
-                        </div>
+                        <div className="vote-count">{p.voteCount}</div>
                       </div>
                       <div className="proposal-actions">
                         <button
@@ -2073,7 +2079,7 @@ export default function Home() {
                       : "less than a day"}
                   </div>
                   <div className="rollover-timer-sub">
-                    Current passages will be archived to History and fresh readings will arrive.
+                    This week&apos;s passages will make way for fresh readings.
                   </div>
                 </div>
               </section>

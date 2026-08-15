@@ -342,3 +342,14 @@ $$;
 -- into end_verse's text (exclusive). NULL = whole verse (legacy annotations).
 ALTER TABLE annotations ADD COLUMN IF NOT EXISTS start_offset INT;
 ALTER TABLE annotations ADD COLUMN IF NOT EXISTS end_offset INT;
+
+-- Week cadence repair: weeks are calendar weeks in the group's timezone, so every
+-- open week must close at the start of the NEXT calendar week. Live weeks were
+-- created with voting_close_at = week start + voting_duration_hours (68h by
+-- default), which would roll groups over every ~2.8 days — and many are already
+-- past due. Re-anchor every non-resolved week. The target expression is
+-- deterministic within a calendar week, so re-running this migration is a no-op.
+UPDATE weeks w
+SET voting_close_at = ((date_trunc('week', now() AT TIME ZONE g.timezone) + interval '7 days') AT TIME ZONE g.timezone)
+FROM groups g
+WHERE g.id = w.group_id AND w.status != 'RESOLVED';

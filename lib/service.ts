@@ -325,14 +325,24 @@ async function sendVerseReplyEmails(params: {
   );
 }
 
-async function getCurrentWeekMeta(groupId: string): Promise<{ startDate: string; closeAt: string }> {
+// A "week" is a calendar week in the group's timezone. It opens at the current
+// week's Monday 00:00 and closes at the START of the next calendar week
+// (next Monday 00:00), which is always strictly in the future — including for a
+// rollover that fires right on a Monday boundary. `voting_duration_hours` is
+// deliberately NOT used here: it is a vestigial per-group setting and using it
+// made "weeks" cycle every 68 hours for default-configured groups.
+async function getCurrentWeekMeta(
+  groupId: string,
+  client?: PoolClient,
+): Promise<{ startDate: string; closeAt: string }> {
   const row = await dbQueryOne<{ start_date: string; close_at: string }>(
     `SELECT
        date_trunc('week', now() AT TIME ZONE g.timezone)::date::text AS start_date,
-       ((date_trunc('week', now() AT TIME ZONE g.timezone) + interval '1 hour' * g.voting_duration_hours) AT TIME ZONE g.timezone)::text AS close_at
+       ((date_trunc('week', now() AT TIME ZONE g.timezone) + interval '7 days') AT TIME ZONE g.timezone)::text AS close_at
      FROM groups g
      WHERE g.id = $1`,
     [groupId],
+    client,
   );
 
   if (!row) {
@@ -627,18 +637,22 @@ async function rolloverGroupWeek(
     );
 
     const group = await getGroup(groupId, client);
+    // Anchor the new week to the calendar week in the group's timezone: it runs
+    // until the start of the NEXT calendar week (next Monday 00:00), never
+    // NOW() + voting_duration_hours.
+    const meta = await getCurrentWeekMeta(groupId, client);
     const newWeek = await dbQueryOne<{ id: string; start_date: string }>(
       // Guarded insert-select: structurally idempotent. If a concurrent caller
       // already opened the next week, the NOT EXISTS check makes this a no-op
       // instead of creating a second open week (we cannot rely on row locks
       // alone, and the current week was just set RESOLVED by this caller).
       `INSERT INTO weeks(group_id, start_date, voting_close_at, status)
-       SELECT $1, CURRENT_DATE, NOW() + (interval '1 hour' * $2::int), 'VOTING_OPEN'
+       SELECT $1, $2::date, $3::timestamptz, 'VOTING_OPEN'
        WHERE NOT EXISTS (
          SELECT 1 FROM weeks WHERE group_id = $1 AND status != 'RESOLVED'
        )
        RETURNING id, start_date::text`,
-      [groupId, group.voting_duration_hours],
+      [groupId, meta.startDate, meta.closeAt],
       client,
     );
     if (!newWeek) return { rolledOver: false, newWeekId: null };
@@ -961,6 +975,189 @@ export async function getGroupSnapshot(groupId: string, userId: string) {
   };
 }
 
+export type HistoryPassage = {
+  readingItemId: string;
+  proposalId: string | null;
+  reference: string;
+  voteCount: number;
+  commentsCount: number;
+  readCount: number;
+};
+
+export type HistoryWeek = {
+  weekId: string;
+  startDate: string;
+  passages: HistoryPassage[];
+};
+
+export async function getGroupHistory(groupId: string, userId: string): Promise<HistoryWeek[]> {
+  await requireMembership(groupId, userId);
+
+  const weeks = await dbQuery<{ id: string; start_date: string }>(
+    `SELECT id, start_date::text
+     FROM weeks
+     WHERE group_id = $1 AND status = 'RESOLVED'
+     ORDER BY start_date DESC, created_at DESC
+     LIMIT 24`,
+    [groupId],
+  );
+  if (weeks.length === 0) return [];
+
+  const items = await dbQuery<{
+    week_id: string;
+    reading_item_id: string;
+    proposal_id: string | null;
+    reference: string;
+    created_at: string | null;
+  }>(
+    `SELECT ri.week_id, ri.id AS reading_item_id, ri.proposal_id, ri.reference, p.created_at::text
+     FROM reading_items ri
+     JOIN weeks w ON w.id = ri.week_id
+     LEFT JOIN proposals p ON p.id = ri.proposal_id
+     WHERE w.group_id = $1 AND w.status = 'RESOLVED'`,
+    [groupId],
+  );
+  if (items.length === 0) {
+    return weeks.map((w) => ({ weekId: w.id, startDate: w.start_date, passages: [] }));
+  }
+
+  const [commentRows, readRows, voteRows] = await Promise.all([
+    dbQuery<{ reading_item_id: string; n: string }>(
+      `SELECT c.reading_item_id, COUNT(*)::text AS n
+       FROM comments c
+       JOIN reading_items ri ON ri.id = c.reading_item_id
+       JOIN weeks w ON w.id = ri.week_id
+       WHERE w.group_id = $1 AND w.status = 'RESOLVED' AND c.deleted_at IS NULL
+       GROUP BY c.reading_item_id`,
+      [groupId],
+    ),
+    dbQuery<{ reading_item_id: string; n: string }>(
+      `SELECT rm.reading_item_id, COUNT(*)::text AS n
+       FROM read_marks rm
+       JOIN reading_items ri ON ri.id = rm.reading_item_id
+       JOIN weeks w ON w.id = ri.week_id
+       WHERE w.group_id = $1 AND w.status = 'RESOLVED' AND rm.status = 'READ'
+       GROUP BY rm.reading_item_id`,
+      [groupId],
+    ),
+    dbQuery<{ proposal_id: string; n: string }>(
+      `SELECT v.proposal_id, COUNT(*)::text AS n
+       FROM votes v
+       JOIN weeks w ON w.id = v.week_id
+       WHERE w.group_id = $1 AND w.status = 'RESOLVED'
+       GROUP BY v.proposal_id`,
+      [groupId],
+    ),
+  ]);
+
+  const commentsByItem = new Map(commentRows.map((r) => [r.reading_item_id, Number(r.n)]));
+  const readsByItem = new Map(readRows.map((r) => [r.reading_item_id, Number(r.n)]));
+  const votesByProposal = new Map(voteRows.map((r) => [r.proposal_id, Number(r.n)]));
+
+  const passagesByWeek = new Map<string, HistoryPassage[]>();
+  for (const item of items) {
+    const passage: HistoryPassage = {
+      readingItemId: item.reading_item_id,
+      proposalId: item.proposal_id,
+      reference: item.reference,
+      voteCount: item.proposal_id ? (votesByProposal.get(item.proposal_id) ?? 0) : 0,
+      commentsCount: commentsByItem.get(item.reading_item_id) ?? 0,
+      readCount: readsByItem.get(item.reading_item_id) ?? 0,
+    };
+    const list = passagesByWeek.get(item.week_id) ?? [];
+    list.push(passage);
+    passagesByWeek.set(item.week_id, list);
+  }
+
+  for (const list of passagesByWeek.values()) {
+    list.sort((a, b) => b.voteCount - a.voteCount || a.reference.localeCompare(b.reference));
+  }
+
+  return weeks.map((w) => ({
+    weekId: w.id,
+    startDate: w.start_date,
+    passages: passagesByWeek.get(w.id) ?? [],
+  }));
+}
+
+export async function getArchivedWeek(groupId: string, weekId: string, userId: string) {
+  await requireMembership(groupId, userId);
+
+  const week = await dbQueryOne<WeekRow>(
+    `${WEEK_SELECT} WHERE id = $1 AND group_id = $2`,
+    [weekId, groupId],
+  );
+  if (!week) throw new ServiceError("Week not found", 404);
+  if (week.status !== "RESOLVED") {
+    throw new ServiceError("That week is still in progress", 400);
+  }
+
+  const [proposals, votes] = await Promise.all([
+    dbQuery<{
+      id: string;
+      reference: string;
+      note: string;
+      proposer_id: string;
+      proposer_name: string;
+      created_at: string;
+      is_seed: boolean;
+    }>(
+      `SELECT p.id, p.reference, p.note, p.proposer_id, u.name AS proposer_name,
+              p.created_at::text, p.is_seed
+       FROM proposals p
+       JOIN users u ON u.id = p.proposer_id
+       WHERE p.week_id = $1 AND p.deleted_at IS NULL
+       ORDER BY p.created_at ASC`,
+      [week.id],
+    ),
+    dbQuery<{ proposal_id: string; user_id: string; user_name: string }>(
+      `SELECT v.proposal_id, v.user_id, u.name AS user_name
+       FROM votes v
+       JOIN users u ON u.id = v.user_id
+       WHERE v.week_id = $1`,
+      [week.id],
+    ),
+  ]);
+
+  const readingItems = await dbQuery<{ proposal_id: string; id: string }>(
+    `SELECT proposal_id, id FROM reading_items
+     WHERE week_id = $1 AND proposal_id IS NOT NULL`,
+    [week.id],
+  );
+  const readingItemByProposal = new Map(readingItems.map((r) => [r.proposal_id, r.id]));
+
+  const voteCounts = new Map<string, number>();
+  for (const vote of votes) {
+    voteCounts.set(vote.proposal_id, (voteCounts.get(vote.proposal_id) ?? 0) + 1);
+  }
+
+  const passages = proposals
+    .map((p) => ({
+      id: p.id,
+      reference: p.reference,
+      note: p.note,
+      proposerId: p.proposer_id,
+      proposerName: p.proposer_name,
+      createdAt: String(p.created_at),
+      isSeed: p.is_seed,
+      voteCount: voteCounts.get(p.id) ?? 0,
+      voters: votes
+        .filter((v) => v.proposal_id === p.id)
+        .map((v) => ({ id: v.user_id, name: v.user_name })),
+      readingItemId: readingItemByProposal.get(p.id) ?? null,
+    }))
+    .sort((a, b) => b.voteCount - a.voteCount || String(a.createdAt).localeCompare(String(b.createdAt)));
+
+  return {
+    week: {
+      id: week.id,
+      startDate: week.start_date,
+      status: week.status,
+    },
+    passages,
+  };
+}
+
 export async function addProposal(params: {
   groupId: string;
   userId: string;
@@ -1109,22 +1306,19 @@ async function notifyGroupsOnRead(userId: string, readingItemId: string): Promis
       const otherWeek = await getActiveWeek(gid);
       if (!otherWeek || otherWeek.status !== "VOTING_OPEN" || isPast(otherWeek.voting_close_at)) continue;
 
-      // Check if reference is already the current reading or already proposed
-      const [existingReading, existingProposal] = await Promise.all([
-        dbQueryOne<{ id: string }>(
-          `SELECT ri.id FROM reading_items ri
-           JOIN weeks w ON w.id = ri.week_id
-           WHERE w.group_id = $1 AND ri.reference = $2`,
-          [gid, item.reference],
-        ),
-        dbQueryOne<{ id: string }>(
-          `SELECT id FROM proposals
-           WHERE week_id = $1 AND reference = $2 AND deleted_at IS NULL`,
-          [otherWeek.id, item.reference],
-        ),
-      ]);
+      // Only suppress when the reference is already a LIVE passage in the target
+      // group's current active week. Checking every reading_items row (as before)
+      // suppressed the suggestion forever, because every proposal — including
+      // never-voted seeds — now creates a reading item. Every active passage has
+      // a live proposal row, so this check alone is sufficient.
+      const existingProposal = await dbQueryOne<{ id: string }>(
+        `SELECT id FROM proposals
+         WHERE week_id = $1 AND reference = $2
+           AND deleted_at IS NULL AND archived_at IS NULL`,
+        [otherWeek.id, item.reference],
+      );
 
-      if (existingReading || existingProposal) continue;
+      if (existingProposal) continue;
 
       await notifyGroupMembers(
         gid,
