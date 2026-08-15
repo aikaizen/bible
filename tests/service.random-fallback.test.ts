@@ -1,16 +1,9 @@
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 
-import {
-  __resetRandomSourceForTests,
-  __setRandomSourceForTests,
-  castVote,
-  createGroup,
-  getGroupSnapshot,
-  resolveCurrentWeek,
-} from "@/lib/service";
-import { addGroupMember, createTestDb, createUser, type TestDb } from "@/tests/helpers/test-db";
+import { __resetRandomSourceForTests, createGroup, getGroupSnapshot } from "@/lib/service";
+import { createTestDb, createUser, type TestDb } from "@/tests/helpers/test-db";
 
-describe("service random fallback", () => {
+describe("service rollover seeds", () => {
   let testDb: TestDb;
 
   beforeEach(async () => {
@@ -23,7 +16,7 @@ describe("service random fallback", () => {
     await testDb.close();
   });
 
-  it("uses deterministic random selection when resolving a no-vote week", async () => {
+  it("creates a fresh seed list on rollover that does not reuse the prior week's passages", async () => {
     const ownerId = await createUser(testDb.pool, { name: "Owner", email: "owner-no-votes@example.com" });
     const group = await createGroup({
       name: "No Vote Group",
@@ -34,45 +27,17 @@ describe("service random fallback", () => {
 
     const snapshot = await getGroupSnapshot(group.groupId!, ownerId);
     expect(snapshot.proposals.length).toBeGreaterThan(1);
+    const priorRefs = snapshot.proposals.map((p) => p.reference);
 
-    __setRandomSourceForTests(() => 0.99);
-    const resolved = await resolveCurrentWeek(group.groupId!, ownerId);
+    await testDb.pool.query(`UPDATE weeks SET voting_close_at = NOW() - interval '1 hour' WHERE id = $1`, [
+      snapshot.week.id,
+    ]);
+    const next = await getGroupSnapshot(group.groupId!, ownerId);
 
-    expect(resolved.status).toBe("RESOLVED");
-    expect(resolved.reference).toBe(snapshot.proposals[snapshot.proposals.length - 1].reference);
-  });
-
-  it("uses deterministic random selection for RANDOM tie policy", async () => {
-    const ownerId = await createUser(testDb.pool, { name: "Owner", email: "owner-tie@example.com" });
-    const memberAId = await createUser(testDb.pool, { name: "Member A", email: "member-a@example.com" });
-    const memberBId = await createUser(testDb.pool, { name: "Member B", email: "member-b@example.com" });
-
-    const group = await createGroup({
-      name: "Tie Group",
-      timezone: "America/New_York",
-      ownerId,
-      tiePolicy: "RANDOM",
-      votingDurationHours: 168,
-    });
-
-    await addGroupMember(testDb.pool, { groupId: group.groupId!, userId: memberAId, role: "MEMBER" });
-    await addGroupMember(testDb.pool, { groupId: group.groupId!, userId: memberBId, role: "MEMBER" });
-
-    const initial = await getGroupSnapshot(group.groupId!, ownerId);
-    expect(initial.proposals.length).toBeGreaterThan(1);
-
-    await castVote({ groupId: group.groupId!, userId: ownerId, proposalId: initial.proposals[0].id });
-    await castVote({ groupId: group.groupId!, userId: memberAId, proposalId: initial.proposals[1].id });
-
-    const tiedSnapshot = await getGroupSnapshot(group.groupId!, ownerId);
-    const maxVoteCount = Math.max(...tiedSnapshot.proposals.map((proposal) => proposal.voteCount));
-    const tied = tiedSnapshot.proposals.filter((proposal) => proposal.voteCount === maxVoteCount);
-    expect(tied.length).toBe(2);
-
-    __setRandomSourceForTests(() => 0.99);
-    const resolved = await resolveCurrentWeek(group.groupId!, ownerId);
-
-    expect(resolved.status).toBe("RESOLVED");
-    expect(resolved.reference).toBe(tied[1].reference);
+    expect(next.week.id).not.toBe(snapshot.week.id);
+    expect(next.proposals.length).toBeGreaterThan(0);
+    for (const p of next.proposals) {
+      expect(priorRefs).not.toContain(p.reference);
+    }
   });
 });

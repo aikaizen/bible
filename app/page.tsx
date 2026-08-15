@@ -66,6 +66,25 @@ function getBookSuggestions(input: string): string[] {
   ).slice(0, 5);
 }
 
+function verseSegments(text: string, verse: number, anns: Annotation[]) {
+  const ranges = anns.map((a) => {
+    const from = a.startVerse === verse && a.startOffset != null ? Math.min(a.startOffset, text.length) : 0;
+    const to = a.endVerse === verse && a.endOffset != null ? Math.min(a.endOffset, text.length) : text.length;
+    return { from: Math.min(from, to), to: Math.max(from, to), ann: a };
+  }).filter((r) => r.to > r.from);
+  if (ranges.length === 0) return [{ text, ann: null as Annotation | null }];
+
+  const cuts = Array.from(new Set([0, text.length, ...ranges.flatMap((r) => [r.from, r.to])])).sort((a, b) => a - b);
+  const segs: Array<{ text: string; ann: Annotation | null }> = [];
+  for (let i = 0; i < cuts.length - 1; i++) {
+    const from = cuts[i];
+    const to = cuts[i + 1];
+    const covering = ranges.find((r) => r.from <= from && r.to >= to);
+    segs.push({ text: text.slice(from, to), ann: covering?.ann ?? null });
+  }
+  return segs;
+}
+
 /* ─── Types ─── */
 
 type User = { id: string; name: string; email: string; language: string };
@@ -90,8 +109,12 @@ type Snapshot = {
     proposerName: string; createdAt: string; voteCount: number; isSeed: boolean;
     voters: Array<{ id: string; name: string }>;
     commentCount: number; unreadCount: number;
+    readingItemId: string | null;
+    myVote: boolean;
+    canReroll: boolean;
   }>;
   myRole: "OWNER" | "ADMIN" | "MEMBER";
+  myVoteProposalIds: string[];
   myVoteProposalId: string | null;
   readingItem: {
     id: string; reference: string; proposalId: string | null;
@@ -159,6 +182,7 @@ type AnnotationReply = {
 type Annotation = {
   id: string; authorId: string; authorName: string;
   startVerse: number; endVerse: number;
+  startOffset: number | null; endOffset: number | null;
   text: string; createdAt: string; canDelete: boolean;
   replies: AnnotationReply[];
 };
@@ -341,7 +365,11 @@ export default function Home() {
 
   // Annotations (verse highlights)
   const [annotations, setAnnotations] = useState<Annotation[]>([]);
-  const [selectedVerses, setSelectedVerses] = useState<{ start: number; end: number } | null>(null);
+  const [selectedVerses, setSelectedVerses] = useState<{
+    start: number; end: number; startOffset: number | null; endOffset: number | null;
+  } | null>(null);
+  const [activeReadingItemId, setActiveReadingItemId] = useState<string | null>(null);
+  const activeReadingItemIdRef = useRef<string | null>(null);
   const [activeAnnotation, setActiveAnnotation] = useState<Annotation | null>(null);
   const [annotationText, setAnnotationText] = useState("");
   const [annotationReplyText, setAnnotationReplyText] = useState("");
@@ -394,12 +422,31 @@ export default function Home() {
 
   const isAdmin = snapshot?.myRole === "OWNER" || snapshot?.myRole === "ADMIN";
 
+  const myProposalCount = snapshot
+    ? snapshot.proposals.filter((p) => !p.isSeed && p.proposerId === selectedUserId).length
+    : 0;
+
+  const currentReading = useMemo(() => {
+    if (!snapshot) return null;
+    if (activeReadingItemId) {
+      const match = snapshot.proposals.find((p) => p.readingItemId === activeReadingItemId);
+      if (match?.readingItemId) {
+        return {
+          id: match.readingItemId,
+          reference: match.reference,
+          proposalId: match.id,
+          note: match.note,
+          proposerName: match.proposerName,
+        };
+      }
+    }
+    return snapshot.readingItem;
+  }, [snapshot, activeReadingItemId]);
+
   const topVotedProposalId = useMemo(() => {
     if (!snapshot || snapshot.proposals.length === 0) return null;
-    const maxVotes = Math.max(...snapshot.proposals.map((p) => p.voteCount));
-    if (maxVotes <= 0) return null;
-    const topProposals = snapshot.proposals.filter((p) => p.voteCount === maxVotes);
-    return topProposals.length === 1 ? topProposals[0].id : null;
+    const first = snapshot.proposals[0];
+    return first.voteCount > 0 ? first.id : null;
   }, [snapshot]);
 
   // Build a map of verse -> annotations for highlight rendering
@@ -428,19 +475,44 @@ export default function Home() {
     }
   }
 
+  function selectReadingItem(id: string | null) {
+    setActiveReadingItemId(id);
+    activeReadingItemIdRef.current = id;
+  }
+
   function openInReader(reference: string) {
     setReaderReference(reference);
     setTab("reading");
     void loadBibleText(reference);
   }
 
+  function openPassage(p: Snapshot["proposals"][number]) {
+    if (p.readingItemId) selectReadingItem(p.readingItemId);
+    setReaderReference(null);
+    setTab("reading");
+    void loadBibleText(p.reference);
+    if (p.readingItemId) {
+      void (async () => {
+        try {
+          const [c, a] = await Promise.all([
+            api<{ comments: Comment[] }>(`/api/reading-items/${p.readingItemId}/comments`),
+            api<{ annotations: Annotation[] }>(`/api/reading-items/${p.readingItemId}/annotations`),
+          ]);
+          setComments(c.comments);
+          setAnnotations(a.annotations);
+        } catch { /* ignore */ }
+      })();
+    }
+  }
+
   function goToWeekReading() {
     setReaderReference(null);
-    if (snapshot?.readingItem) void loadBibleText(snapshot.readingItem.reference);
+    if (currentReading) void loadBibleText(currentReading.reference);
+    else if (snapshot?.readingItem) void loadBibleText(snapshot.readingItem.reference);
   }
 
   function navigateReader(delta: number) {
-    const current = readerReference ?? snapshot?.readingItem?.reference;
+    const current = readerReference ?? currentReading?.reference ?? snapshot?.readingItem?.reference;
     if (!current) return;
     const next = navigateChapter(current, delta);
     if (next) openInReader(next);
@@ -451,22 +523,30 @@ export default function Home() {
     setSnapshot(payload);
     setInviteToken(payload.group.inviteToken ?? "");
 
-    if (payload.readingItem) {
+    const stillValid = activeReadingItemIdRef.current
+      && payload.proposals.some((p) => p.readingItemId === activeReadingItemIdRef.current);
+    const readingId = stillValid
+      ? activeReadingItemIdRef.current
+      : payload.readingItem?.id ?? null;
+    selectReadingItem(readingId);
+
+    const readingMeta = readingId
+      ? payload.proposals.find((p) => p.readingItemId === readingId)
+      : null;
+    const readingRef = readingMeta?.reference ?? payload.readingItem?.reference ?? null;
+
+    if (readingId) {
       const [c, a] = await Promise.all([
-        api<{ comments: Comment[] }>(
-          `/api/reading-items/${payload.readingItem.id}/comments`,
-        ),
-        api<{ annotations: Annotation[] }>(
-          `/api/reading-items/${payload.readingItem.id}/annotations`,
-        ),
-        loadBibleText(payload.readingItem.reference),
+        api<{ comments: Comment[] }>(`/api/reading-items/${readingId}/comments`),
+        api<{ annotations: Annotation[] }>(`/api/reading-items/${readingId}/annotations`),
+        readerReference ? Promise.resolve() : readingRef ? loadBibleText(readingRef) : Promise.resolve(),
       ]);
       setComments(c.comments);
       setAnnotations(a.annotations);
     } else {
       setComments([]);
       setAnnotations([]);
-      setBibleText(null);
+      if (!readerReference) setBibleText(null);
     }
 
     const n = await api<{ notifications: NotificationItem[] }>(`/api/users/me/notifications`);
@@ -527,18 +607,18 @@ export default function Home() {
 
   // Draft persistence
   useEffect(() => {
-    if (!selectedUserId || !snapshot?.readingItem) return;
-    const key = `bible-app-draft:${snapshot.readingItem.id}:${selectedUserId}`;
+    if (!selectedUserId || !currentReading) return;
+    const key = `bible-app-draft:${currentReading.id}:${selectedUserId}`;
     setNewComment(window.localStorage.getItem(key) ?? "");
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [selectedUserId, snapshot?.readingItem?.id]);
+  }, [selectedUserId, currentReading?.id]);
 
   useEffect(() => {
-    if (!selectedUserId || !snapshot?.readingItem) return;
-    const key = `bible-app-draft:${snapshot.readingItem.id}:${selectedUserId}`;
+    if (!selectedUserId || !currentReading) return;
+    const key = `bible-app-draft:${currentReading.id}:${selectedUserId}`;
     window.localStorage.setItem(key, newComment);
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [newComment, selectedUserId, snapshot?.readingItem?.id]);
+  }, [newComment, selectedUserId, currentReading?.id]);
 
   /* ─── Verse selection detection ─── */
 
@@ -565,7 +645,30 @@ export default function Home() {
     }
 
     if (startVerse !== null && endVerse !== null) {
-      setSelectedVerses({ start: startVerse, end: endVerse });
+      function offsetWithinVerse(span: HTMLSpanElement, node: Node, nodeOffset: number): number {
+        let total = 0;
+        const walker = document.createTreeWalker(span, NodeFilter.SHOW_TEXT, {
+          acceptNode: (t) =>
+            t.parentElement?.closest("sup") ? NodeFilter.FILTER_REJECT : NodeFilter.FILTER_ACCEPT,
+        });
+        for (let t = walker.nextNode(); t; t = walker.nextNode()) {
+          if (t === node) return total + nodeOffset;
+          total += t.textContent?.length ?? 0;
+        }
+        return total;
+      }
+
+      const startSpan = container.querySelector<HTMLSpanElement>(`[data-verse="${startVerse}"]`);
+      const endSpan = container.querySelector<HTMLSpanElement>(`[data-verse="${endVerse}"]`);
+      let startOffset: number | null = null;
+      let endOffset: number | null = null;
+      if (startSpan && startSpan.contains(range.startContainer)) {
+        startOffset = offsetWithinVerse(startSpan, range.startContainer, range.startOffset);
+      }
+      if (endSpan && endSpan.contains(range.endContainer)) {
+        endOffset = offsetWithinVerse(endSpan, range.endContainer, range.endOffset);
+      }
+      setSelectedVerses({ start: startVerse, end: endVerse, startOffset, endOffset });
       setBottomSheetMode("new");
       setAnnotationText("");
       setBottomSheetOpen(true);
@@ -599,25 +702,27 @@ export default function Home() {
   }
 
   async function loadAnnotations() {
-    if (!snapshot?.readingItem) return;
+    if (!currentReading) return;
     try {
       const a = await api<{ annotations: Annotation[] }>(
-        `/api/reading-items/${snapshot.readingItem.id}/annotations`,
+        `/api/reading-items/${currentReading.id}/annotations`,
       );
       setAnnotations(a.annotations);
     } catch { /* ignore */ }
   }
 
   function onCreateAnnotation() {
-    if (!selectedVerses || !annotationText.trim() || !snapshot?.readingItem) return;
+    if (!selectedVerses || !annotationText.trim() || !currentReading) return;
     void (async () => {
       try {
         setSubmitting(true);
-        await api(`/api/reading-items/${snapshot.readingItem!.id}/annotations`, {
+        await api(`/api/reading-items/${currentReading.id}/annotations`, {
           method: "POST",
           body: JSON.stringify({
             startVerse: selectedVerses.start,
             endVerse: selectedVerses.end,
+            startOffset: selectedVerses.startOffset,
+            endOffset: selectedVerses.endOffset,
             text: annotationText.trim(),
           }),
         });
@@ -644,7 +749,7 @@ export default function Home() {
         await loadAnnotations();
         // Refresh the active annotation
         const updated = await api<{ annotations: Annotation[] }>(
-          `/api/reading-items/${snapshot!.readingItem!.id}/annotations`,
+          `/api/reading-items/${currentReading!.id}/annotations`,
         );
         setAnnotations(updated.annotations);
         const refreshed = updated.annotations.find((a) => a.id === activeAnnotation.id);
@@ -936,28 +1041,29 @@ export default function Home() {
   function onChangeGroup(newGId: string) {
     setGroupId(newGId);
     window.localStorage.setItem("bible-app-group-id", newGId);
+    selectReadingItem(null);
+    setReaderReference(null);
     void refreshData(newGId);
   }
 
   function onVote(proposalId: string) {
     if (!groupId || !selectedUserId) return;
-    // Optimistic UI: update vote immediately
     setSnapshot((prev) => {
       if (!prev) return prev;
       const userName = prev.members.find((m) => m.id === selectedUserId)?.name ?? "";
       return {
         ...prev,
-        myVoteProposalId: proposalId,
         proposals: prev.proposals.map((p) => {
-          const hadMyVote = prev.myVoteProposalId === p.id;
-          const getsMyVote = p.id === proposalId;
-          const newVoters = hadMyVote
-            ? p.voters.filter((v) => v.id !== selectedUserId)
-            : p.voters;
+          if (p.id !== proposalId) return p;
+          const hadMyVote = p.voters.some((v) => v.id === selectedUserId);
           return {
             ...p,
-            voteCount: p.voteCount + (getsMyVote ? 1 : 0) - (hadMyVote ? 1 : 0),
-            voters: getsMyVote ? [...newVoters, { id: selectedUserId, name: userName }] : newVoters,
+            myVote: !hadMyVote,
+            canReroll: p.isSeed && (hadMyVote ? p.voteCount - 1 : p.voteCount + 1) === 0 && isAdmin,
+            voteCount: p.voteCount + (hadMyVote ? -1 : 1),
+            voters: hadMyVote
+              ? p.voters.filter((v) => v.id !== selectedUserId)
+              : [...p.voters, { id: selectedUserId, name: userName }],
           };
         }),
       };
@@ -965,14 +1071,14 @@ export default function Home() {
     void (async () => {
       try {
         setSubmitting(true);
-        await api<{ ok: boolean; autoResolved?: boolean }>(`/api/groups/${groupId}/vote`, {
+        await api(`/api/groups/${groupId}/vote`, {
           method: "POST",
           body: JSON.stringify({ proposalId }),
         });
         await refreshData();
       } catch (err) {
         setError(err instanceof Error ? err.message : "Vote failed");
-        await refreshData(); // Revert optimistic update
+        await refreshData();
       } finally {
         setSubmitting(false);
       }
@@ -992,20 +1098,10 @@ export default function Home() {
     });
   }
 
-  function onResolve(proposalId?: string) {
-    if (!groupId || !selectedUserId) return;
-    void mutate(async () => {
-      await api(`/api/groups/${groupId}/resolve`, {
-        method: "POST",
-        body: JSON.stringify({ proposalId }),
-      });
-    });
-  }
-
   function onReadMark(status: "NOT_MARKED" | "PLANNED" | "READ") {
-    if (!selectedUserId || !snapshot?.readingItem) return;
+    if (!selectedUserId || !currentReading) return;
     void mutate(async () => {
-      await api(`/api/reading-items/${snapshot!.readingItem!.id}/read-mark`, {
+      await api(`/api/reading-items/${currentReading.id}/read-mark`, {
         method: "POST",
         body: JSON.stringify({ status }),
       });
@@ -1039,11 +1135,11 @@ export default function Home() {
   }
 
   function onCreateComment(parentId?: string) {
-    if (!selectedUserId || !snapshot?.readingItem) return;
+    if (!selectedUserId || !currentReading) return;
     const text = parentId ? replyDrafts[parentId] ?? "" : newComment;
     if (!text.trim()) return;
     void mutate(async () => {
-      await api(`/api/reading-items/${snapshot.readingItem?.id}/comments`, {
+      await api(`/api/reading-items/${currentReading.id}/comments`, {
         method: "POST",
         body: JSON.stringify({ text, parentId }),
       });
@@ -1226,17 +1322,6 @@ export default function Home() {
         method: "POST",
         body: JSON.stringify({ proposalId }),
       });
-    });
-  }
-
-  function onStartNewVote() {
-    if (!groupId || !selectedUserId) return;
-    void mutate(async () => {
-      await api(`/api/groups/${groupId}/new-vote`, {
-        method: "POST",
-        body: JSON.stringify({}),
-      });
-      setTab("vote");
     });
   }
 
@@ -1668,17 +1753,13 @@ export default function Home() {
               <section className="stack fade-in">
                 <div className="row-between">
                   <div>
-                    <div className="section-title">This Week&apos;s Vote</div>
+                    <div className="section-title">This Week&apos;s Passages</div>
                     <div className="section-sub">
-                      Closes {toDateLabel(snapshot.week.votingCloseAt)} &middot; {daysLeft} day{daysLeft === 1 ? "" : "s"} left
+                      Vote to rank a passage and protect it from reroll
                     </div>
                   </div>
                   <span className="badge badge-gold">{totalVotes} votes</span>
                 </div>
-
-                {snapshot.week.status === "PENDING_MANUAL" && (
-                  <div className="notice">Voting closed without an automatic winner. Admin must resolve.</div>
-                )}
 
                 {snapshot.proposals.length === 0 && (
                   <div className="empty">
@@ -1688,8 +1769,10 @@ export default function Home() {
                 )}
 
                 <div className="stack">
-                  {snapshot.proposals.map((p) => (
-                    <div key={p.id} className={`proposal ${snapshot.myVoteProposalId === p.id ? "voted" : ""}${topVotedProposalId === p.id ? " top-voted" : ""}`}>
+                  {snapshot.proposals.map((p) => {
+                    const iVoted = p.voters.some((v) => v.id === selectedUserId);
+                    return (
+                    <div key={p.id} className={`proposal ${iVoted ? "voted" : ""}${topVotedProposalId === p.id ? " top-voted" : ""}`}>
                       <div className="row-between" style={{ alignItems: "flex-start" }}>
                         <div>
                           <div className="proposal-ref">
@@ -1706,24 +1789,22 @@ export default function Home() {
                           </div>
                         </div>
                         <div className="vote-count">
-                          {snapshot.group.liveTally || snapshot.week.status === "RESOLVED"
-                            ? p.voteCount
-                            : "\u2022"}
+                          {snapshot.group.liveTally ? p.voteCount : "\u2022"}
                         </div>
                       </div>
                       <div className="proposal-actions">
                         <button
-                          className={`btn ${snapshot.myVoteProposalId === p.id ? "btn-gold" : ""}`}
+                          className={`btn ${iVoted ? "btn-gold" : ""}`}
                           onClick={() => onVote(p.id)}
-                          disabled={submitting || snapshot.week.status !== "VOTING_OPEN" || daysLeft <= 0}
+                          disabled={submitting || daysLeft <= 0}
                           type="button"
                         >
-                          {snapshot.myVoteProposalId === p.id && <IconCheck />}
-                          {snapshot.myVoteProposalId === p.id ? "Voted" : "Vote"}
+                          {iVoted && <IconCheck />}
+                          {iVoted ? "Voted" : "Vote"}
                         </button>
                         <button
                           className="btn btn-sm"
-                          onClick={() => openInReader(p.reference)}
+                          onClick={() => openPassage(p)}
                           type="button"
                         >
                           Read
@@ -1756,15 +1837,11 @@ export default function Home() {
                           <button
                             className="btn btn-sm"
                             onClick={() => onReroll(p.id)}
-                            disabled={submitting}
+                            disabled={submitting || !p.canReroll || p.voteCount > 0}
+                            title={p.voteCount > 0 ? "Voted passages can't be rerolled" : "Swap this suggestion"}
                             type="button"
                           >
                             Reroll
-                          </button>
-                        )}
-                        {isAdmin && snapshot.week.status === "PENDING_MANUAL" && (
-                          <button className="btn btn-gold btn-sm" onClick={() => onResolve(p.id)} disabled={submitting} type="button">
-                            Pick Winner
                           </button>
                         )}
                       </div>
@@ -1827,13 +1904,18 @@ export default function Home() {
                       )}
 
                     </div>
-                  ))}
+                    );
+                  })}
                 </div>
 
                 {/* Propose form */}
-                {snapshot.week.status === "VOTING_OPEN" && daysLeft > 0 && (
+                {daysLeft > 0 && (
                   <>
-                    {!showPropose ? (
+                    {myProposalCount >= 2 ? (
+                      <div className="text-tertiary" style={{ fontSize: 12 }}>
+                        You&apos;ve proposed 2 passages this week — the weekly limit.
+                      </div>
+                    ) : !showPropose ? (
                       <button
                         className="btn"
                         onClick={() => setShowPropose(true)}
@@ -1906,33 +1988,17 @@ export default function Home() {
                   </>
                 )}
 
-                {/* Admin resolve + New vote */}
-                {isAdmin && snapshot.week.status !== "RESOLVED" && (
-                  <button
-                    className="btn btn-sm"
-                    onClick={() => onResolve()}
-                    disabled={submitting}
-                    type="button"
-                  >
-                    Resolve Now (Admin)
-                  </button>
-                )}
-
-                {snapshot.week.status === "RESOLVED" && (
-                  <div className="card stack" style={{ textAlign: "center" }}>
-                    <div className="text-muted">
-                      This week&apos;s vote is resolved. {snapshot.readingItem ? `Reading: ${snapshot.readingItem.reference}` : ""}
-                    </div>
-                    <button
-                      className="btn btn-gold"
-                      onClick={onStartNewVote}
-                      disabled={submitting}
-                      type="button"
-                    >
-                      Start New Vote
-                    </button>
+                <div className="card rollover-timer">
+                  <div className="rollover-timer-label">Next week begins in</div>
+                  <div className="rollover-timer-value">
+                    {daysLeft > 0
+                      ? `${daysLeft} day${daysLeft === 1 ? "" : "s"}`
+                      : "less than a day"}
                   </div>
-                )}
+                  <div className="rollover-timer-sub">
+                    Current passages will be archived to History and fresh readings will arrive.
+                  </div>
+                </div>
               </section>
             )}
 

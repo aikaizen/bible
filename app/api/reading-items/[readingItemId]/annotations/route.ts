@@ -27,6 +27,8 @@ export async function POST(
       startVerse: number;
       endVerse: number;
       text: string;
+      startOffset?: number | null;
+      endOffset?: number | null;
     }>(request);
 
     const data = await createAnnotation({
@@ -35,6 +37,8 @@ export async function POST(
       startVerse: body.startVerse,
       endVerse: body.endVerse,
       text: body.text,
+      startOffset: body.startOffset,
+      endOffset: body.endOffset,
     });
 
     return ok(data, 201);

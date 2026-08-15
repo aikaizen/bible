@@ -310,3 +310,35 @@ BEGIN
   END IF;
 END
 $$;
+
+-- ============================================================
+-- P0 voting redesign (2026-08-14): passage-list model
+-- ============================================================
+
+-- Proposals: archive support (rollover sweeps passages into history)
+ALTER TABLE proposals ADD COLUMN IF NOT EXISTS archived_at TIMESTAMPTZ;
+ALTER TABLE proposals ADD COLUMN IF NOT EXISTS archived_by UUID REFERENCES users(id);
+
+-- Reading items: one per proposal (was one per week)
+ALTER TABLE reading_items DROP CONSTRAINT IF EXISTS reading_items_week_id_key;
+CREATE INDEX IF NOT EXISTS idx_reading_items_week_id ON reading_items(week_id);
+CREATE UNIQUE INDEX IF NOT EXISTS idx_reading_items_proposal_unique
+  ON reading_items(proposal_id) WHERE proposal_id IS NOT NULL;
+
+-- Votes: one vote per user per PASSAGE (was one per user per week)
+ALTER TABLE votes DROP CONSTRAINT IF EXISTS votes_week_id_user_id_key;
+DO $$
+BEGIN
+  IF NOT EXISTS (
+    SELECT 1 FROM pg_constraint WHERE conname = 'votes_proposal_user_unique'
+  ) THEN
+    ALTER TABLE votes ADD CONSTRAINT votes_proposal_user_unique UNIQUE (proposal_id, user_id);
+  END IF;
+END
+$$;
+
+-- Annotations: optional character offsets for partial-verse highlights.
+-- start_offset = char offset into start_verse's text; end_offset = char offset
+-- into end_verse's text (exclusive). NULL = whole verse (legacy annotations).
+ALTER TABLE annotations ADD COLUMN IF NOT EXISTS start_offset INT;
+ALTER TABLE annotations ADD COLUMN IF NOT EXISTS end_offset INT;

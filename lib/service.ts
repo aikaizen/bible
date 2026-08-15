@@ -4,6 +4,7 @@ import { PoolClient } from "pg";
 import { dbQuery, dbQueryOne, withTransaction } from "./db";
 import { handleDeaconMention } from "./deacon";
 import { sendEmail, NotificationType, getEmailPreferenceColumn, EmailUser } from "./email";
+import { MAX_USER_PROPOSALS_PER_WEEK } from "./contract-v2";
 import { isValidReference, normalizeReference } from "./reference";
 import { pickGlobalSeedsForDate, pickSeedPassages } from "./seed-passages";
 
@@ -51,12 +52,6 @@ type ProposalVoteRow = {
   created_at: string;
   vote_count: string;
   is_seed: boolean;
-};
-
-type WeekProposalRow = {
-  id: string;
-  reference: string;
-  created_at: string;
 };
 
 type ReadingItemRow = {
@@ -362,41 +357,23 @@ export function __resetRandomSourceForTests(): void {
   randomSource = () => Math.random();
 }
 
-async function getWeekProposals(
+async function ensureReadingItemForProposal(
   weekId: string,
+  proposalId: string,
+  reference: string,
   client?: PoolClient,
-): Promise<WeekProposalRow[]> {
-  return dbQuery<WeekProposalRow>(
-    `SELECT id, reference, created_at::text
-     FROM proposals
-     WHERE week_id = $1
-       AND deleted_at IS NULL
-     ORDER BY created_at ASC`,
-    [weekId],
+): Promise<void> {
+  const existing = await dbQueryOne<{ id: string }>(
+    `SELECT id FROM reading_items WHERE proposal_id = $1`,
+    [proposalId],
     client,
   );
-}
+  if (existing) return;
 
-async function pickRandomProposalForWeek(
-  weekId: string,
-  client?: PoolClient,
-): Promise<WeekProposalRow | null> {
-  const proposals = await getWeekProposals(weekId, client);
-  return pickRandom(proposals);
-}
-
-async function upsertWeekReadingFromProposal(
-  weekId: string,
-  proposal: Pick<WeekProposalRow, "id" | "reference">,
-  client?: PoolClient,
-): Promise<ReadingItemRow | null> {
-  return dbQueryOne<ReadingItemRow>(
+  await dbQuery(
     `INSERT INTO reading_items(week_id, proposal_id, reference)
-     VALUES ($1, $2, $3)
-     ON CONFLICT (week_id)
-     DO UPDATE SET proposal_id = EXCLUDED.proposal_id, reference = EXCLUDED.reference
-     RETURNING id, proposal_id, reference`,
-    [weekId, proposal.id, proposal.reference],
+     VALUES ($1, $2, $3)`,
+    [weekId, proposalId, reference],
     client,
   );
 }
@@ -405,62 +382,28 @@ async function ensureWeekReadingItem(
   weekId: string,
   client?: PoolClient,
 ): Promise<ReadingItemRow | null> {
-  const [proposals, existingReading] = await Promise.all([
-    getWeekProposals(weekId, client),
-    dbQueryOne<ReadingItemRow>(
-      `SELECT id, proposal_id, reference
-       FROM reading_items
-       WHERE week_id = $1`,
-      [weekId],
-      client,
-    ),
-  ]);
-
-  if (proposals.length === 0) return existingReading;
-
-  if (
-    existingReading?.proposal_id &&
-    proposals.some((proposal) => proposal.id === existingReading.proposal_id)
-  ) {
-    return existingReading;
+  const proposals = await dbQuery<{ id: string; reference: string }>(
+    `SELECT p.id, p.reference FROM proposals p
+     WHERE p.week_id = $1 AND p.deleted_at IS NULL AND p.archived_at IS NULL`,
+    [weekId],
+    client,
+  );
+  for (const proposal of proposals) {
+    await ensureReadingItemForProposal(weekId, proposal.id, proposal.reference, client);
   }
 
-  const randomProposal = pickRandom(proposals);
-  if (!randomProposal) return existingReading;
-
-  return upsertWeekReadingFromProposal(weekId, randomProposal, client);
-}
-
-async function syncReadingToVoteLeader(weekId: string): Promise<void> {
-  const tallies = await dbQuery<{
-    id: string;
-    reference: string;
-    vote_count: string;
-    created_at: string;
-  }>(
-    `SELECT
-       p.id,
-       p.reference,
-       COUNT(v.id)::text AS vote_count,
-       p.created_at::text
-     FROM proposals p
+  return dbQueryOne<ReadingItemRow>(
+    `SELECT ri.id, ri.proposal_id, ri.reference
+     FROM reading_items ri
+     JOIN proposals p ON p.id = ri.proposal_id
      LEFT JOIN votes v ON v.proposal_id = p.id
-     WHERE p.week_id = $1
-       AND p.deleted_at IS NULL
-     GROUP BY p.id, p.reference, p.created_at
-     ORDER BY COUNT(v.id) DESC, p.created_at ASC`,
+     WHERE ri.week_id = $1 AND p.deleted_at IS NULL AND p.archived_at IS NULL
+     GROUP BY ri.id, ri.proposal_id, ri.reference, p.created_at
+     ORDER BY COUNT(v.id) DESC, p.created_at ASC
+     LIMIT 1`,
     [weekId],
+    client,
   );
-
-  if (tallies.length === 0) return;
-
-  const topVotes = Number(tallies[0].vote_count);
-  if (topVotes <= 0) return;
-
-  const tied = tallies.filter((row) => Number(row.vote_count) === topVotes);
-  if (tied.length !== 1) return;
-
-  await upsertWeekReadingFromProposal(weekId, tied[0]);
 }
 
 async function insertSeedProposals(
@@ -469,25 +412,31 @@ async function insertSeedProposals(
   ownerId: string,
   count = 3,
   startDate?: string,
+  client?: PoolClient,
 ): Promise<void> {
-  // Get all references read across ALL groups (global history for seed sync)
   const pastReferences = await dbQuery<{ reference: string }>(
     `SELECT DISTINCT ri.reference FROM reading_items ri`,
+    [],
+    client,
   );
 
   const alreadyRead = pastReferences.map((r) => r.reference);
 
-  // Use deterministic selection when startDate is provided (syncs seeds across groups)
   const seeds = startDate
     ? pickGlobalSeedsForDate(startDate, count, alreadyRead)
     : pickSeedPassages(count, alreadyRead);
 
   for (const seed of seeds) {
-    await dbQuery(
+    const proposal = await dbQueryOne<{ id: string }>(
       `INSERT INTO proposals(week_id, proposer_id, reference, note, is_seed)
-       VALUES ($1, $2, $3, $4, TRUE)`,
+       VALUES ($1, $2, $3, $4, TRUE)
+       RETURNING id`,
       [weekId, ownerId, seed.reference, seed.note],
+      client,
     );
+    if (proposal) {
+      await ensureReadingItemForProposal(weekId, proposal.id, seed.reference, client);
+    }
   }
 }
 
@@ -599,184 +548,91 @@ async function maybeSendVotingReminder(week: WeekRow): Promise<void> {
   );
 }
 
-async function calculateWinner(
-  weekId: string,
-  tiePolicy: TiePolicy,
-): Promise<{ proposalId: string | null; status: WeekStatus; reason?: string }> {
-  const proposals = await dbQuery<ProposalVoteRow>(
-    `SELECT
-       p.id,
-       p.reference,
-       p.note,
-       p.proposer_id,
-       u.name AS proposer_name,
-       p.created_at::text,
-       COUNT(v.id)::text AS vote_count
-     FROM proposals p
-     JOIN users u ON u.id = p.proposer_id
-     LEFT JOIN votes v ON v.proposal_id = p.id
-     WHERE p.week_id = $1
-       AND p.deleted_at IS NULL
-     GROUP BY p.id, p.reference, p.note, p.proposer_id, p.created_at, u.name
-     ORDER BY COUNT(v.id) DESC, p.created_at ASC`,
-    [weekId],
-  );
-
-  if (proposals.length === 0) {
-    return { proposalId: null, status: "PENDING_MANUAL", reason: "NO_PROPOSALS" };
-  }
-
-  const topVotes = Number(proposals[0].vote_count);
-  if (topVotes <= 0) {
-    const randomProposal = pickRandom(proposals);
-    return randomProposal
-      ? { proposalId: randomProposal.id, status: "RESOLVED", reason: "NO_VOTES_RANDOM" }
-      : { proposalId: null, status: "PENDING_MANUAL", reason: "NO_VOTES" };
-  }
-
-  const tied = proposals.filter((proposal) => Number(proposal.vote_count) === topVotes);
-  if (tied.length === 1) {
-    return { proposalId: tied[0].id, status: "RESOLVED" };
-  }
-
-  if (tiePolicy === "ADMIN_PICK") {
-    return { proposalId: null, status: "PENDING_MANUAL", reason: "TIE_ADMIN_PICK" };
-  }
-
-  if (tiePolicy === "RANDOM") {
-    const pick = pickRandom(tied);
-    if (!pick) {
-      return { proposalId: null, status: "PENDING_MANUAL", reason: "TIE_RANDOM_EMPTY" };
-    }
-    return { proposalId: pick.id, status: "RESOLVED", reason: "TIE_RANDOM" };
-  }
-
-  return { proposalId: tied[0].id, status: "RESOLVED", reason: "TIE_EARLIEST" };
-}
-
-async function finalizeWeek(
-  weekId: string,
-  proposalId: string,
-  actorUserId?: string,
-): Promise<{ weekStatus: WeekStatus; readingItemId: string | null; reference: string | null }> {
+async function rolloverGroupWeek(
+  groupId: string,
+): Promise<{ rolledOver: boolean; newWeekId: string | null }> {
   return withTransaction(async (client) => {
+    const current = await dbQueryOne<WeekRow>(
+      `${WEEK_SELECT} WHERE group_id = $1 AND status != 'RESOLVED'
+       ORDER BY created_at DESC LIMIT 1`,
+      [groupId],
+      client,
+    );
+    if (!current || !isPast(current.voting_close_at)) {
+      return { rolledOver: false, newWeekId: null };
+    }
+
     const week = await dbQueryOne<WeekRow>(
-      `SELECT id, group_id, start_date, voting_close_at::text, resolved_reading_id, status, reminder_sent_at::text
-       FROM weeks
-       WHERE id = $1
-       FOR UPDATE`,
-      [weekId],
+      `${WEEK_SELECT} WHERE id = $1 FOR UPDATE`,
+      [current.id],
       client,
     );
-
-    if (!week) {
-      throw new ServiceError("Week not found", 404);
+    if (!week || week.status === "RESOLVED" || !isPast(week.voting_close_at)) {
+      return { rolledOver: false, newWeekId: null };
     }
 
-    if (week.resolved_reading_id) {
-      const existing = await dbQueryOne<{ id: string; reference: string }>(
-        `SELECT id, reference
-         FROM reading_items
-         WHERE id = $1`,
-        [week.resolved_reading_id],
-        client,
-      );
-
-      return {
-        weekStatus: "RESOLVED",
-        readingItemId: existing?.id ?? week.resolved_reading_id,
-        reference: existing?.reference ?? null,
-      };
-    }
-
-    const proposal = await dbQueryOne<{ id: string; reference: string }>(
-      `SELECT id, reference
-       FROM proposals
-       WHERE id = $1 AND week_id = $2 AND deleted_at IS NULL`,
-      [proposalId, week.id],
-      client,
-    );
-
-    if (!proposal) {
-      throw new ServiceError("Proposal is not eligible for this week", 400);
-    }
-
-    const reading = await dbQueryOne<{ id: string; reference: string }>(
-      `INSERT INTO reading_items(week_id, proposal_id, reference)
-       VALUES ($1, $2, $3)
-       ON CONFLICT (week_id)
-       DO UPDATE SET proposal_id = EXCLUDED.proposal_id, reference = EXCLUDED.reference
-       RETURNING id, reference`,
-      [week.id, proposal.id, proposal.reference],
-      client,
-    );
+    const topReading = await ensureWeekReadingItem(week.id, client);
 
     await dbQuery(
-      `UPDATE weeks
-       SET resolved_reading_id = $1,
-           status = 'RESOLVED'
-       WHERE id = $2`,
-      [reading?.id, week.id],
+      `UPDATE weeks SET status = 'RESOLVED', resolved_reading_id = $2 WHERE id = $1`,
+      [week.id, topReading?.id ?? null],
+      client,
+    );
+    await dbQuery(
+      `UPDATE proposals SET archived_at = NOW()
+       WHERE week_id = $1 AND deleted_at IS NULL AND archived_at IS NULL`,
+      [week.id],
       client,
     );
 
-    // Get group name for email context
-    const winnerGroup = await dbQueryOne<{ name: string }>(
+    const group = await getGroup(groupId, client);
+    const newWeek = await dbQueryOne<{ id: string; start_date: string }>(
+      // Guarded insert-select: structurally idempotent. If a concurrent caller
+      // already opened the next week, the NOT EXISTS check makes this a no-op
+      // instead of creating a second open week (we cannot rely on row locks
+      // alone, and the current week was just set RESOLVED by this caller).
+      `INSERT INTO weeks(group_id, start_date, voting_close_at, status)
+       SELECT $1, CURRENT_DATE, NOW() + (interval '1 hour' * $2::int), 'VOTING_OPEN'
+       WHERE NOT EXISTS (
+         SELECT 1 FROM weeks WHERE group_id = $1 AND status != 'RESOLVED'
+       )
+       RETURNING id, start_date::text`,
+      [groupId, group.voting_duration_hours],
+      client,
+    );
+    if (!newWeek) return { rolledOver: false, newWeekId: null };
+
+    await insertSeedProposals(groupId, newWeek.id, group.owner_id, 3, newWeek.start_date, client);
+    await ensureWeekReadingItem(newWeek.id, client);
+
+    const groupForNotify = await dbQueryOne<{ name: string }>(
       `SELECT name FROM groups WHERE id = $1`,
-      [week.group_id],
+      [groupId],
       client,
     );
-
     await notifyGroupMembers(
-      week.group_id,
-      "WINNER_SELECTED",
-      `This week's reading is ${proposal.reference}.`,
-      {
-        groupId: week.group_id,
-        weekId: week.id,
-        readingItemId: reading?.id,
-        reference: proposal.reference,
-        groupName: winnerGroup?.name,
-      },
-      actorUserId,
+      groupId,
+      "VOTING_OPENED",
+      "A new week of readings is open!",
+      { groupId, weekId: newWeek.id, groupName: groupForNotify?.name },
+      undefined,
       client,
     );
 
-    return {
-      weekStatus: "RESOLVED",
-      readingItemId: reading?.id ?? null,
-      reference: reading?.reference ?? null,
-    };
+    return { rolledOver: true, newWeekId: newWeek.id };
   });
 }
 
-async function maybeAutoResolveWeek(week: WeekRow): Promise<void> {
-  if (week.status === "RESOLVED") return;
-  if (!isPast(week.voting_close_at)) return;
+async function ensureCurrentWeek(groupId: string): Promise<WeekRow> {
+  let week = await ensureCurrentWeekExists(groupId);
 
-  const group = await getGroup(week.group_id);
-  const winner = await calculateWinner(week.id, group.tie_policy);
-
-  if (!winner.proposalId || winner.status === "PENDING_MANUAL") {
-    const randomProposal = await pickRandomProposalForWeek(week.id);
-    if (randomProposal) {
-      await finalizeWeek(week.id, randomProposal.id);
-      return;
-    }
-
-    await dbQuery(`UPDATE weeks SET status = 'PENDING_MANUAL' WHERE id = $1`, [week.id]);
-    return;
+  if (isPast(week.voting_close_at) && week.status !== "RESOLVED") {
+    await rolloverGroupWeek(groupId);
+    week = await ensureCurrentWeekExists(groupId);
   }
 
-  await finalizeWeek(week.id, winner.proposalId);
-}
-
-async function ensureCurrentWeek(groupId: string): Promise<WeekRow> {
-  const week = await ensureCurrentWeekExists(groupId);
   await ensureWeekReadingItem(week.id);
   await maybeSendVotingReminder(week);
-  await maybeAutoResolveWeek(week);
-  await ensureWeekReadingItem(week.id);
 
   const refreshedWeek = await dbQueryOne<WeekRow>(
     `SELECT id, group_id, start_date, voting_close_at::text, resolved_reading_id, status, reminder_sent_at::text
@@ -792,50 +648,6 @@ async function ensureCurrentWeek(groupId: string): Promise<WeekRow> {
   return refreshedWeek;
 }
 
-export async function resolveCurrentWeek(
-  groupId: string,
-  userId: string,
-  manualProposalId?: string,
-): Promise<{ status: WeekStatus; readingItemId: string | null; reference: string | null }> {
-  await requireAdmin(groupId, userId);
-  const week = await ensureCurrentWeek(groupId);
-
-  if (week.resolved_reading_id) {
-    const reading = await dbQueryOne<{ id: string; reference: string }>(
-      `SELECT id, reference FROM reading_items WHERE id = $1`,
-      [week.resolved_reading_id],
-    );
-
-    return { status: "RESOLVED", readingItemId: reading?.id ?? null, reference: reading?.reference ?? null };
-  }
-
-  if (manualProposalId) {
-    const result = await finalizeWeek(week.id, manualProposalId, userId);
-    return { status: result.weekStatus, readingItemId: result.readingItemId, reference: result.reference };
-  }
-
-  const group = await getGroup(groupId);
-  const winner = await calculateWinner(week.id, group.tie_policy);
-
-  if (!winner.proposalId || winner.status === "PENDING_MANUAL") {
-    const randomProposal = await pickRandomProposalForWeek(week.id);
-    if (randomProposal) {
-      const randomResult = await finalizeWeek(week.id, randomProposal.id, userId);
-      return {
-        status: randomResult.weekStatus,
-        readingItemId: randomResult.readingItemId,
-        reference: randomResult.reference,
-      };
-    }
-
-    await dbQuery(`UPDATE weeks SET status = 'PENDING_MANUAL' WHERE id = $1`, [week.id]);
-    return { status: "PENDING_MANUAL", readingItemId: null, reference: null };
-  }
-
-  const result = await finalizeWeek(week.id, winner.proposalId, userId);
-  return { status: result.weekStatus, readingItemId: result.readingItemId, reference: result.reference };
-}
-
 export async function getGroupSnapshot(groupId: string, userId: string) {
   const week = await ensureCurrentWeek(groupId);
   const [membership, group] = await Promise.all([
@@ -843,7 +655,7 @@ export async function getGroupSnapshot(groupId: string, userId: string) {
     getGroup(groupId),
   ]);
 
-  const [members, proposals, votes, myVote, readingItem, history, invite, pendingInvites, proposalCommentCounts] = await Promise.all([
+  const [members, proposals, votes, myVotes, readingItem, history, invite, pendingInvites, proposalCommentCounts, proposalReadingItems] = await Promise.all([
     dbQuery<{
       id: string;
       name: string;
@@ -872,6 +684,7 @@ export async function getGroupSnapshot(groupId: string, userId: string) {
        LEFT JOIN votes v ON v.proposal_id = p.id
        WHERE p.week_id = $1
          AND p.deleted_at IS NULL
+         AND p.archived_at IS NULL
        GROUP BY p.id, p.reference, p.note, p.proposer_id, p.created_at, p.is_seed, u.name
        ORDER BY COUNT(v.id) DESC, p.created_at ASC`,
       [week.id],
@@ -887,10 +700,10 @@ export async function getGroupSnapshot(groupId: string, userId: string) {
        WHERE v.week_id = $1`,
       [week.id],
     ),
-    dbQueryOne<{ proposal_id: string }>(
-      `SELECT proposal_id
-       FROM votes
-       WHERE week_id = $1 AND user_id = $2`,
+    dbQuery<{ proposal_id: string }>(
+      `SELECT v.proposal_id FROM votes v
+       JOIN proposals p ON p.id = v.proposal_id
+       WHERE v.week_id = $1 AND v.user_id = $2 AND p.deleted_at IS NULL`,
       [week.id, userId],
     ),
     dbQueryOne<{
@@ -907,9 +720,15 @@ export async function getGroupSnapshot(groupId: string, userId: string) {
          p.note,
          u.name AS proposer_name
        FROM reading_items ri
-       LEFT JOIN proposals p ON p.id = ri.proposal_id
+       JOIN proposals p ON p.id = ri.proposal_id
        LEFT JOIN users u ON u.id = p.proposer_id
-       WHERE ri.week_id = $1`,
+       LEFT JOIN votes v ON v.proposal_id = p.id
+       WHERE ri.week_id = $1
+         AND p.deleted_at IS NULL
+         AND p.archived_at IS NULL
+       GROUP BY ri.id, ri.reference, ri.proposal_id, p.note, u.name, p.created_at
+       ORDER BY COUNT(v.id) DESC, p.created_at ASC
+       LIMIT 1`,
       [week.id],
     ),
     dbQuery<{
@@ -976,6 +795,10 @@ export async function getGroupSnapshot(groupId: string, userId: string) {
        GROUP BY pc.proposal_id`,
       [week.id],
     ),
+    dbQuery<{ proposal_id: string; id: string }>(
+      `SELECT proposal_id, id FROM reading_items WHERE week_id = $1 AND proposal_id IS NOT NULL`,
+      [week.id],
+    ),
   ]);
 
   // Build maps for comment counts and unread counts
@@ -1003,6 +826,9 @@ export async function getGroupSnapshot(groupId: string, userId: string) {
       )
     : [];
   const unreadCountMap = new Map(unreadCountsRaw.map((r) => [r.proposal_id, Number(r.unread_count)]));
+  const readingItemByProposal = new Map(proposalReadingItems.map((r) => [r.proposal_id, r.id]));
+  const myVoteIds = myVotes.map((v) => v.proposal_id);
+  const isCallerAdmin = mapRoleWeight(membership.role) >= mapRoleWeight("ADMIN");
 
   const readMarks = readingItem
     ? await dbQuery<{ user_id: string; status: ReadStatus }>(
@@ -1050,9 +876,13 @@ export async function getGroupSnapshot(groupId: string, userId: string) {
         .map((vote) => ({ id: vote.user_id, name: vote.user_name })),
       commentCount: commentCountMap.get(proposal.id) ?? 0,
       unreadCount: unreadCountMap.get(proposal.id) ?? 0,
+      readingItemId: readingItemByProposal.get(proposal.id) ?? null,
+      myVote: myVoteIds.includes(proposal.id),
+      canReroll: proposal.is_seed && Number(proposal.vote_count) === 0 && isCallerAdmin,
     })),
     myRole: membership.role,
-    myVoteProposalId: myVote?.proposal_id ?? null,
+    myVoteProposalIds: myVoteIds,
+    myVoteProposalId: myVoteIds[0] ?? null,
     readingItem: readingItem
       ? {
           id: readingItem.id,
@@ -1101,6 +931,16 @@ export async function addProposal(params: {
     throw new ServiceError("Voting is closed for this week", 400);
   }
 
+  const mine = await dbQueryOne<{ count: string }>(
+    `SELECT COUNT(*)::text AS count FROM proposals
+     WHERE week_id = $1 AND proposer_id = $2 AND is_seed = FALSE
+       AND deleted_at IS NULL AND archived_at IS NULL`,
+    [week.id, params.userId],
+  );
+  if (Number(mine?.count ?? 0) >= MAX_USER_PROPOSALS_PER_WEEK) {
+    throw new ServiceError("You can propose up to 2 passages per week", 400);
+  }
+
   const reference = normalizeReference(params.reference);
   if (!isValidReference(reference)) {
     throw new ServiceError("Invalid reference format (ex: John 3:1-21)", 422);
@@ -1114,6 +954,10 @@ export async function addProposal(params: {
      RETURNING id`,
     [week.id, params.userId, reference, note],
   );
+
+  if (proposal) {
+    await ensureReadingItemForProposal(week.id, proposal.id, reference);
+  }
 
   return { proposalId: proposal?.id ?? null };
 }
@@ -1143,27 +987,6 @@ export async function removeProposal(params: { groupId: string; userId: string; 
 
   await dbQuery(`UPDATE proposals SET deleted_at = NOW() WHERE id = $1`, [params.proposalId]);
 
-  if (proposal.week_status !== "RESOLVED") {
-    const remaining = await dbQueryOne<{ count: string }>(
-      `SELECT COUNT(*)::text AS count
-       FROM proposals
-       WHERE week_id = $1
-         AND deleted_at IS NULL`,
-      [proposal.week_id],
-    );
-
-    if (Number(remaining?.count ?? 0) === 0) {
-      const group = await getGroup(params.groupId);
-      const week = await dbQueryOne<{ start_date: string }>(
-        `SELECT start_date::text FROM weeks WHERE id = $1`,
-        [proposal.week_id],
-      );
-      await insertSeedProposals(params.groupId, proposal.week_id, group.owner_id, 1, week?.start_date);
-    }
-
-    await ensureWeekReadingItem(proposal.week_id);
-  }
-
   return { ok: true };
 }
 
@@ -1179,7 +1002,7 @@ export async function castVote(params: { groupId: string; userId: string; propos
 
   const exists = await dbQueryOne<{ id: string }>(
     `SELECT p.id FROM proposals p
-     WHERE p.id = $1 AND p.week_id = $2 AND p.deleted_at IS NULL`,
+     WHERE p.id = $1 AND p.week_id = $2 AND p.deleted_at IS NULL AND p.archived_at IS NULL`,
     [params.proposalId, week.id],
   );
 
@@ -1187,21 +1010,21 @@ export async function castVote(params: { groupId: string; userId: string; propos
     throw new ServiceError("Proposal not found for current week", 404);
   }
 
-  await dbQuery(
-    `INSERT INTO votes(week_id, proposal_id, user_id)
-     VALUES ($1, $2, $3)
-     ON CONFLICT (week_id, user_id)
-     DO UPDATE SET proposal_id = EXCLUDED.proposal_id, created_at = NOW()`,
-    [week.id, params.proposalId, params.userId],
+  const existingVote = await dbQueryOne<{ id: string }>(
+    `SELECT id FROM votes WHERE proposal_id = $1 AND user_id = $2`,
+    [params.proposalId, params.userId],
   );
 
-  // NOTE: Voting deliberately does NOT resolve the week or switch the shared
-  // reading. Weeks close on the voting timer (maybeAutoResolveWeek) or by
-  // explicit admin resolve. Mid-week re-anchoring of the reading item
-  // (syncReadingToVoteLeader) silently re-attached verse comments to a
-  // different passage, and all-members-voted auto-resolve ended the week the
-  // moment a lone member voted.
-  return { ok: true, autoResolved: false };
+  if (existingVote) {
+    await dbQuery(`DELETE FROM votes WHERE id = $1`, [existingVote.id]);
+    return { ok: true as const, voted: false };
+  }
+
+  await dbQuery(
+    `INSERT INTO votes(week_id, proposal_id, user_id) VALUES ($1, $2, $3)`,
+    [week.id, params.proposalId, params.userId],
+  );
+  return { ok: true as const, voted: true };
 }
 
 async function notifyGroupsOnRead(userId: string, readingItemId: string): Promise<void> {
@@ -1943,10 +1766,16 @@ export async function rerollSeedProposal(params: {
   if (!proposal) throw new ServiceError("Proposal not found", 404);
   if (!proposal.is_seed) throw new ServiceError("Only seed proposals can be rerolled", 400);
 
-  // Soft-delete the old seed
+  const voteRow = await dbQueryOne<{ count: string }>(
+    `SELECT COUNT(*)::text AS count FROM votes WHERE proposal_id = $1`,
+    [params.proposalId],
+  );
+  if (Number(voteRow?.count ?? 0) > 0) {
+    throw new ServiceError("This passage has votes and can't be rerolled", 400);
+  }
+
   await dbQuery(`UPDATE proposals SET deleted_at = NOW() WHERE id = $1`, [params.proposalId]);
 
-  // Get already-used references (read + current proposals)
   const [pastRefs, currentRefs] = await Promise.all([
     dbQuery<{ reference: string }>(
       `SELECT DISTINCT ri.reference FROM reading_items ri
@@ -1964,58 +1793,18 @@ export async function rerollSeedProposal(params: {
 
   if (seeds.length > 0) {
     const group = await getGroup(params.groupId);
-    await dbQuery(
+    const replacement = await dbQueryOne<{ id: string }>(
       `INSERT INTO proposals(week_id, proposer_id, reference, note, is_seed)
-       VALUES ($1, $2, $3, $4, TRUE)`,
+       VALUES ($1, $2, $3, $4, TRUE)
+       RETURNING id`,
       [proposal.week_id, group.owner_id, seeds[0].reference, seeds[0].note],
     );
-  }
-
-  if (proposal.week_status !== "RESOLVED") {
-    await ensureWeekReadingItem(proposal.week_id);
+    if (replacement) {
+      await ensureReadingItemForProposal(proposal.week_id, replacement.id, seeds[0].reference);
+    }
   }
 
   return { ok: true };
-}
-
-export async function startNewVote(params: { groupId: string; userId: string }) {
-  await requireMembership(params.groupId, params.userId);
-
-  // Verify current week is resolved
-  const latestWeek = await dbQueryOne<WeekRow>(
-    `${WEEK_SELECT} WHERE group_id = $1 ORDER BY created_at DESC LIMIT 1`,
-    [params.groupId],
-  );
-
-  if (!latestWeek) throw new ServiceError("No previous week found", 400);
-  if (latestWeek.status !== "RESOLVED") {
-    throw new ServiceError("Current vote must be resolved before starting a new one", 400);
-  }
-
-  const group = await getGroup(params.groupId);
-  const votingHours = group.voting_duration_hours;
-
-  const newWeek = await dbQueryOne<{ id: string; start_date: string }>(
-    `INSERT INTO weeks(group_id, start_date, voting_close_at, status)
-     VALUES ($1, CURRENT_DATE, NOW() + (interval '1 hour' * $2::int), 'VOTING_OPEN')
-     RETURNING id, start_date::text`,
-    [params.groupId, votingHours],
-  );
-
-  if (!newWeek) throw new ServiceError("Failed to create new vote round", 500);
-
-  await insertSeedProposals(params.groupId, newWeek.id, group.owner_id, 3, newWeek.start_date);
-  await ensureWeekReadingItem(newWeek.id);
-
-  await notifyGroupMembers(
-    params.groupId,
-    "VOTING_OPENED",
-    "A new vote round has started!",
-    { groupId: params.groupId, weekId: newWeek.id },
-    params.userId,
-  );
-
-  return { weekId: newWeek.id };
 }
 
 export async function removeMember(params: {
@@ -2233,11 +2022,14 @@ export async function getAnnotations(readingItemId: string, userId: string, isSu
     author_name: string;
     start_verse: number;
     end_verse: number;
+    start_offset: number | null;
+    end_offset: number | null;
     text: string;
     created_at: string;
   }>(
     `SELECT a.id, a.author_id, u.name AS author_name,
-            a.start_verse, a.end_verse, a.text, a.created_at::text
+            a.start_verse, a.end_verse, a.start_offset, a.end_offset,
+            a.text, a.created_at::text
      FROM annotations a
      JOIN users u ON u.id = a.author_id
      WHERE a.reading_item_id = $1
@@ -2274,6 +2066,8 @@ export async function getAnnotations(readingItemId: string, userId: string, isSu
     authorName: a.author_name,
     startVerse: a.start_verse,
     endVerse: a.end_verse,
+    startOffset: a.start_offset,
+    endOffset: a.end_offset,
     text: a.text,
     createdAt: a.created_at,
     canDelete: a.author_id === userId || isSuperAdmin,
@@ -2297,6 +2091,8 @@ export async function createAnnotation(params: {
   startVerse: number;
   endVerse: number;
   text: string;
+  startOffset?: number | null;
+  endOffset?: number | null;
 }) {
   const text = params.text.trim();
   if (!text) throw new ServiceError("Comment cannot be empty", 422);
@@ -2305,13 +2101,30 @@ export async function createAnnotation(params: {
     throw new ServiceError("Invalid verse range", 422);
   }
 
+  const startOffset = params.startOffset ?? null;
+  const endOffset = params.endOffset ?? null;
+  if (startOffset !== null && (!Number.isInteger(startOffset) || startOffset < 0)) {
+    throw new ServiceError("Invalid start offset", 422);
+  }
+  if (endOffset !== null && (!Number.isInteger(endOffset) || endOffset < 0)) {
+    throw new ServiceError("Invalid end offset", 422);
+  }
+  if (
+    params.startVerse === params.endVerse &&
+    startOffset !== null &&
+    endOffset !== null &&
+    endOffset <= startOffset
+  ) {
+    throw new ServiceError("End offset must be after start offset", 422);
+  }
+
   await requireReadingAccess(params.readingItemId, params.userId);
 
   const annotation = await dbQueryOne<{ id: string }>(
-    `INSERT INTO annotations(reading_item_id, author_id, start_verse, end_verse, text)
-     VALUES ($1, $2, $3, $4, $5)
+    `INSERT INTO annotations(reading_item_id, author_id, start_verse, end_verse, start_offset, end_offset, text)
+     VALUES ($1, $2, $3, $4, $5, $6, $7)
      RETURNING id`,
-    [params.readingItemId, params.userId, params.startVerse, params.endVerse, text],
+    [params.readingItemId, params.userId, params.startVerse, params.endVerse, startOffset, endOffset, text],
   );
 
   await sendVerseCommentEmails({

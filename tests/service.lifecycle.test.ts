@@ -1,13 +1,6 @@
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 
-import {
-  __resetRandomSourceForTests,
-  castVote,
-  createGroup,
-  getGroupSnapshot,
-  resolveCurrentWeek,
-  startNewVote,
-} from "@/lib/service";
+import { __resetRandomSourceForTests, castVote, createGroup, getGroupSnapshot } from "@/lib/service";
 import { addGroupMember, createTestDb, createUser, type TestDb } from "@/tests/helpers/test-db";
 
 describe("service lifecycle", () => {
@@ -23,7 +16,7 @@ describe("service lifecycle", () => {
     await testDb.close();
   });
 
-  it("creates an active week, keeps voting open until explicitly resolved, and starts a new vote round", async () => {
+  it("archives the week at rollover and starts a fresh one with new seeds", async () => {
     const ownerId = await createUser(testDb.pool, { name: "Owner", email: "owner@example.com" });
     const memberId = await createUser(testDb.pool, { name: "Member", email: "member@example.com" });
 
@@ -36,42 +29,47 @@ describe("service lifecycle", () => {
 
     await addGroupMember(testDb.pool, { groupId: group.groupId!, userId: memberId, role: "MEMBER" });
 
-    const initial = await getGroupSnapshot(group.groupId!, ownerId);
-    expect(initial.week.status).toBe("VOTING_OPEN");
-    expect(initial.readingItem).not.toBeNull();
-    expect(initial.proposals.length).toBeGreaterThan(0);
+    const first = await getGroupSnapshot(group.groupId!, ownerId);
+    expect(first.week.status).toBe("VOTING_OPEN");
+    expect(first.readingItem).not.toBeNull();
+    expect(first.proposals.length).toBeGreaterThan(0);
+    const firstWeekId = first.week.id;
+    const firstProposalIds = first.proposals.map((p) => p.id);
 
-    const targetProposalId = initial.proposals[0].id;
-    const firstVote = await castVote({ groupId: group.groupId!, userId: ownerId, proposalId: targetProposalId });
-    expect(firstVote.autoResolved).toBe(false);
+    const firstVote = await castVote({
+      groupId: group.groupId!,
+      userId: ownerId,
+      proposalId: firstProposalIds[0],
+    });
+    expect(firstVote.voted).toBe(true);
 
-    const secondVote = await castVote({ groupId: group.groupId!, userId: memberId, proposalId: targetProposalId });
-    expect(secondVote.autoResolved).toBe(false);
+    const secondVote = await castVote({
+      groupId: group.groupId!,
+      userId: memberId,
+      proposalId: firstProposalIds[0],
+    });
+    expect(secondVote.voted).toBe(true);
 
-    // Voting alone must not end the week — it closes on the timer or by admin resolve.
     const openWeek = await getGroupSnapshot(group.groupId!, ownerId);
     expect(openWeek.week.status).toBe("VOTING_OPEN");
+    expect(openWeek.week.id).toBe(firstWeekId);
 
-    const resolved = await resolveCurrentWeek(group.groupId!, ownerId);
-    expect(resolved.status).toBe("RESOLVED");
+    await testDb.pool.query(`UPDATE weeks SET voting_close_at = NOW() - interval '1 hour' WHERE id = $1`, [
+      firstWeekId,
+    ]);
+    const next = await getGroupSnapshot(group.groupId!, ownerId);
 
-    const latestWeek = await testDb.pool.query<{ status: string; proposal_id: string | null }>(
-      `SELECT w.status::text, ri.proposal_id
-       FROM weeks w
-       LEFT JOIN reading_items ri ON ri.id = w.resolved_reading_id
-       WHERE w.group_id = $1
-       ORDER BY w.created_at DESC
-       LIMIT 1`,
-      [group.groupId],
+    expect(next.week.id).not.toBe(firstWeekId);
+    expect(next.week.status).toBe("VOTING_OPEN");
+    expect(next.proposals.length).toBeGreaterThan(0);
+    for (const p of next.proposals) expect(firstProposalIds).not.toContain(p.id);
+
+    const oldWeek = await testDb.pool.query(`SELECT status::text FROM weeks WHERE id = $1`, [firstWeekId]);
+    expect(oldWeek.rows[0].status).toBe("RESOLVED");
+    const archived = await testDb.pool.query(
+      `SELECT COUNT(*)::int AS n FROM proposals WHERE week_id = $1 AND archived_at IS NULL AND deleted_at IS NULL`,
+      [firstWeekId],
     );
-    expect(latestWeek.rows[0].status).toBe("RESOLVED");
-    expect(latestWeek.rows[0].proposal_id).toBe(targetProposalId);
-
-    const nextWeek = await startNewVote({ groupId: group.groupId!, userId: ownerId });
-    const nextSnapshot = await getGroupSnapshot(group.groupId!, ownerId);
-
-    expect(nextSnapshot.week.id).toBe(nextWeek.weekId);
-    expect(nextSnapshot.week.status).toBe("VOTING_OPEN");
-    expect(nextSnapshot.readingItem).not.toBeNull();
+    expect(archived.rows[0].n).toBe(0);
   });
 });
