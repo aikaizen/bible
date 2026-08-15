@@ -1659,9 +1659,6 @@ export default function Home() {
           {isSuperAdmin && <span className="super-admin-badge">Admin</span>}
         </div>
         <div className="topbar-actions">
-          <button className="icon-btn" onClick={() => void refreshData()} type="button" disabled={submitting}>
-            <svg viewBox="0 0 24 24"><polyline points="23,4 23,10 17,10" /><polyline points="1,20 1,14 7,14" /><path d="M3.51 9a9 9 0 0114.85-3.36L23 10M1 14l4.64 4.36A9 9 0 0020.49 15" /></svg>
-          </button>
           <button className="icon-btn" onClick={() => setDrawerOpen(true)} type="button">
             {notifications.length > 0 && <span className="notif-dot" />}
             <IconMenu />
