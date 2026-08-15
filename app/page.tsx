@@ -105,7 +105,11 @@ type Snapshot = {
     id: string; reference: string; proposalId: string | null;
     note: string | null; proposerName: string | null;
   } | null;
-  readMarks: Array<{ userId: string; status: "NOT_MARKED" | "PLANNED" | "READ" }>;
+  readMarks: Array<{
+    userId: string;
+    status: "NOT_MARKED" | "PLANNED" | "READ";
+    readingItemId?: string;
+  }>;
   history: Array<{
     weekId: string; startDate: string; reference: string;
     commentsCount: number; readCount: number;
@@ -443,15 +447,23 @@ export default function Home() {
     return snapshot.readingItem;
   }, [snapshot, activeReadingItemId]);
 
+  function markForItem(
+    marks: Snapshot["readMarks"],
+    userId: string,
+    readingItemId: string,
+  ): "NOT_MARKED" | "PLANNED" | "READ" {
+    return marks.find((m) =>
+      m.userId === userId && (m.readingItemId == null || m.readingItemId === readingItemId),
+    )?.status ?? "NOT_MARKED";
+  }
+
   const myReadStatus = useMemo(() => {
     if (!currentReading || !selectedUserId) return "NOT_MARKED";
     if (Object.prototype.hasOwnProperty.call(myReadByItem, currentReading.id)) {
       return myReadByItem[currentReading.id];
     }
-    if (snapshot?.readingItem?.id === currentReading.id) {
-      return snapshot.readMarks.find((m) => m.userId === selectedUserId)?.status ?? "NOT_MARKED";
-    }
-    return "NOT_MARKED";
+    if (!snapshot) return "NOT_MARKED";
+    return markForItem(snapshot.readMarks, selectedUserId, currentReading.id);
   }, [currentReading, selectedUserId, myReadByItem, snapshot]);
 
   const topVotedProposalId = useMemo(() => {
@@ -514,6 +526,7 @@ export default function Home() {
       selectReadingItem(p.readingItemId);
       setReaderReference(null);
       void loadPassageDiscussion(p.readingItemId).catch(() => {});
+      markPassageRead(p.readingItemId);
     } else {
       setReaderReference(p.reference);
     }
@@ -1114,9 +1127,34 @@ export default function Home() {
     });
   }
 
+  function markPassageRead(readingItemId: string) {
+    if (!selectedUserId) return;
+    setMyReadByItem((prev) => ({ ...prev, [readingItemId]: "READ" }));
+    void (async () => {
+      try {
+        await api(`/api/reading-items/${readingItemId}/read-mark`, {
+          method: "POST",
+          body: JSON.stringify({ status: "READ" }),
+        });
+        void loadProfile();
+      } catch (err) {
+        setMyReadByItem((prev) => {
+          const next = { ...prev };
+          delete next[readingItemId];
+          return next;
+        });
+        setError(err instanceof Error ? err.message : "Failed to mark as read");
+      }
+    })();
+  }
+
   function onReadMark(status: "NOT_MARKED" | "PLANNED" | "READ") {
     if (!selectedUserId || !currentReading) return;
     const itemId = currentReading.id;
+    if (status === "READ") {
+      markPassageRead(itemId);
+      return;
+    }
     setMyReadByItem((prev) => ({ ...prev, [itemId]: status }));
     void mutate(async () => {
       try {
@@ -1124,6 +1162,7 @@ export default function Home() {
           method: "POST",
           body: JSON.stringify({ status }),
         });
+        void loadProfile();
       } catch (err) {
         setMyReadByItem((prev) => {
           const next = { ...prev };
@@ -1798,6 +1837,16 @@ export default function Home() {
                 <div className="stack">
                   {snapshot.proposals.map((p) => {
                     const iVoted = p.voters.some((v) => v.id === selectedUserId);
+                    const iRead = Boolean(
+                      p.readingItemId && (
+                        myReadByItem[p.readingItemId] === "READ"
+                        || snapshot.readMarks.some((rm) =>
+                          rm.userId === selectedUserId
+                          && rm.status === "READ"
+                          && (rm.readingItemId == null || rm.readingItemId === p.readingItemId),
+                        )
+                      ),
+                    );
                     return (
                     <div key={p.id} className={`proposal ${iVoted ? "voted" : ""}${topVotedProposalId === p.id ? " top-voted" : ""}`}>
                       <div className="row-between" style={{ alignItems: "flex-start" }}>
@@ -1830,10 +1879,11 @@ export default function Home() {
                           {iVoted ? "Voted" : "Vote"}
                         </button>
                         <button
-                          className="btn btn-sm"
+                          className={`btn btn-sm ${iRead ? "btn-gold" : ""}`}
                           onClick={() => openPassage(p)}
                           type="button"
                         >
+                          {iRead && <IconCheck />}
                           Read
                         </button>
                         <button
@@ -2179,10 +2229,9 @@ export default function Home() {
                             </button>
                           </div>
 
-                          {snapshot.readingItem?.id === currentReading.id && (
                           <div>
                             {snapshot.members.map((m) => {
-                              const st = snapshot.readMarks.find((rm) => rm.userId === m.id)?.status ?? "NOT_MARKED";
+                              const st = markForItem(snapshot.readMarks, m.id, currentReading.id);
                               return (
                                 <div key={m.id} className="member-status">
                                   <span className="avatar avatar-sm" style={{ background: colorFor(m.id) }}>{getAvatar(m.name)}</span>
@@ -2195,7 +2244,6 @@ export default function Home() {
                               );
                             })}
                           </div>
-                          )}
                         </>
                       )}
                     </div>
@@ -2445,7 +2493,9 @@ export default function Home() {
                   {snapshot.members.map((m) => {
                     const proposed = snapshot.proposals.filter((p) => p.proposerId === m.id && !p.isSeed).length;
                     const voted = snapshot.proposals.filter((p) => p.voters.some((v) => v.id === m.id)).length;
-                    const readSt = snapshot.readMarks.find((rm) => rm.userId === m.id)?.status ?? "NOT_MARKED";
+                    const readSt = snapshot.readMarks.some((rm) => rm.userId === m.id && rm.status === "READ")
+                      ? "READ"
+                      : snapshot.readMarks.find((rm) => rm.userId === m.id)?.status ?? "NOT_MARKED";
                     const canRemove = isSuperAdmin || (isAdmin && m.id !== selectedUserId && m.role !== "OWNER"
                       && (snapshot.myRole === "OWNER" || m.role !== "ADMIN"));
                     return (

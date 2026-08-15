@@ -871,14 +871,13 @@ export async function getGroupSnapshot(groupId: string, userId: string) {
   const myVoteIds = myVotes.map((v) => v.proposal_id);
   const isCallerAdmin = mapRoleWeight(membership.role) >= mapRoleWeight("ADMIN");
 
-  const readMarks = readingItem
-    ? await dbQuery<{ user_id: string; status: ReadStatus }>(
-        `SELECT user_id, status
-         FROM read_marks
-         WHERE reading_item_id = $1`,
-        [readingItem.id],
-      )
-    : [];
+  const readMarks = await dbQuery<{ user_id: string; reading_item_id: string; status: ReadStatus }>(
+    `SELECT rm.user_id, rm.reading_item_id, rm.status
+     FROM read_marks rm
+     JOIN reading_items ri ON ri.id = rm.reading_item_id
+     WHERE ri.week_id = $1`,
+    [week.id],
+  );
 
   return {
     group: {
@@ -933,7 +932,11 @@ export async function getGroupSnapshot(groupId: string, userId: string) {
           proposerName: readingItem.proposer_name,
         }
       : null,
-    readMarks: readMarks.map((mark) => ({ userId: mark.user_id, status: mark.status })),
+    readMarks: readMarks.map((mark) => ({
+      userId: mark.user_id,
+      readingItemId: mark.reading_item_id,
+      status: mark.status,
+    })),
     history: history.map((item) => ({
       weekId: item.week_id,
       startDate: item.start_date,
