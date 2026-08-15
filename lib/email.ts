@@ -12,7 +12,8 @@ export type NotificationType =
   | "VOTING_REMINDER"
   | "WINNER_SELECTED"
   | "COMMENT_REPLY"
-  | "MENTION";
+  | "MENTION"
+  | "PASSAGE_READ";
 
 export interface EmailUser {
   id: string;

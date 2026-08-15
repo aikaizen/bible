@@ -29,6 +29,12 @@ CREATE TABLE users (
   avatar_image TEXT,
   is_bot BOOLEAN NOT NULL DEFAULT FALSE,
   is_superadmin BOOLEAN NOT NULL DEFAULT FALSE,
+  notify_email_voting BOOLEAN NOT NULL DEFAULT TRUE,
+  notify_email_reminder BOOLEAN NOT NULL DEFAULT TRUE,
+  notify_email_winner BOOLEAN NOT NULL DEFAULT TRUE,
+  notify_email_comments BOOLEAN NOT NULL DEFAULT TRUE,
+  notify_email_mentions BOOLEAN NOT NULL DEFAULT TRUE,
+  unsubscribe_token UUID DEFAULT gen_random_uuid(),
   created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
 

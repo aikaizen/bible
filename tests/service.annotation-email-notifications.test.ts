@@ -10,9 +10,13 @@ import {
 import { sendEmail } from "@/lib/email";
 import { addGroupMember, createTestDb, createUser, type TestDb } from "@/tests/helpers/test-db";
 
-vi.mock("@/lib/email", () => ({
-  sendEmail: vi.fn(async () => {}),
-}));
+vi.mock("@/lib/email", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("@/lib/email")>();
+  return {
+    ...actual,
+    sendEmail: vi.fn(async () => ({ success: true })),
+  };
+});
 
 describe("service annotation email notifications", () => {
   let testDb: TestDb;
@@ -48,6 +52,7 @@ describe("service annotation email notifications", () => {
     }
 
     const emailSpy = vi.mocked(sendEmail);
+    emailSpy.mockClear();
     await createAnnotation({
       readingItemId: snapshot.readingItem.id,
       userId: commenterId,
@@ -57,9 +62,10 @@ describe("service annotation email notifications", () => {
     });
 
     expect(emailSpy).toHaveBeenCalledTimes(2);
-    const recipients = emailSpy.mock.calls.map(([params]) => params.to).sort();
+    const recipients = emailSpy.mock.calls.map(([user]) => user.email).sort();
     expect(recipients).toEqual(["member-verse@example.com", "owner-verse@example.com"]);
-    expect(emailSpy.mock.calls[0][0].subject).toContain("New verse comment");
+    expect(emailSpy.mock.calls[0][1]).toBe("COMMENT_REPLY");
+    expect(emailSpy.mock.calls[0][2].commentText).toContain("New comment on verses 5-6");
   });
 
   it("sends a different email when a reply is posted to a verse thread others already replied in", async () => {
@@ -110,7 +116,8 @@ describe("service annotation email notifications", () => {
     });
 
     expect(emailSpy).toHaveBeenCalledTimes(1);
-    expect(emailSpy.mock.calls[0][0].to).toBe("first-reply@example.com");
-    expect(emailSpy.mock.calls[0][0].subject).toContain("Reply in a verse thread");
+    expect(emailSpy.mock.calls[0][0].email).toBe("first-reply@example.com");
+    expect(emailSpy.mock.calls[0][1]).toBe("COMMENT_REPLY");
+    expect(emailSpy.mock.calls[0][2].commentText).toContain("Reply on verse 9");
   });
 });

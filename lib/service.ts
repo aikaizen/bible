@@ -147,11 +147,7 @@ async function requireAdmin(groupId: string, userId: string, client?: PoolClient
 
 async function notifyGroupMembers(
   groupId: string,
-<<<<<<< HEAD
   type: NotificationType,
-=======
-  type: "VOTING_OPENED" | "VOTING_REMINDER" | "WINNER_SELECTED" | "COMMENT_REPLY" | "MENTION" | "PASSAGE_READ",
->>>>>>> 9a63b3f (feat: add Deacon AI assistant, super admin, email notifications, PASSAGE_READ notifications)
   text: string,
   metadata: Record<string, unknown>,
   actorUserId?: string,
@@ -175,7 +171,7 @@ async function notifyGroupMembers(
      FROM group_members gm
      JOIN users u ON u.id = gm.user_id
      WHERE gm.group_id = $1
-       AND ($2::uuid IS NULL OR gm.user_id <> $2::uuid)
+       AND gm.user_id <> COALESCE($2::uuid, '00000000-0000-0000-0000-000000000000'::uuid)
        AND u.${emailPreferenceColumn} = true`,
     [groupId, actorUserId ?? null],
     client,
@@ -199,11 +195,7 @@ async function notifyGroupMembers(
 
 async function notifyUsers(
   userIds: string[],
-<<<<<<< HEAD
   type: NotificationType,
-=======
-  type: "VOTING_OPENED" | "VOTING_REMINDER" | "WINNER_SELECTED" | "COMMENT_REPLY" | "MENTION" | "PASSAGE_READ",
->>>>>>> 9a63b3f (feat: add Deacon AI assistant, super admin, email notifications, PASSAGE_READ notifications)
   text: string,
   metadata: Record<string, unknown>,
   client?: PoolClient,
@@ -271,26 +263,28 @@ async function sendVerseCommentEmails(params: {
   ]);
   if (!actor || !readingItem) return;
 
-  const recipients = await dbQuery<{ email: string; name: string }>(
-    `SELECT u.email, u.name
+  const recipients = await dbQuery<EmailUser>(
+    `SELECT u.id, u.name, u.email, u.unsubscribe_token AS "unsubscribeToken"
      FROM group_members gm
      JOIN users u ON u.id = gm.user_id
      WHERE gm.group_id = $1
        AND gm.user_id <> $2
-       AND u.is_bot = FALSE`,
+       AND u.is_bot = FALSE
+       AND u.notify_email_comments = TRUE`,
     [readingItem.group_id, params.actorUserId],
   );
   if (recipients.length === 0) return;
 
   const verseLabel = getVerseLabel(params.startVerse, params.endVerse);
-  const appUrl = getAppUrl();
 
   await Promise.all(
     recipients.map((recipient) =>
-      sendEmail({
-        to: recipient.email,
-        subject: `New verse comment on ${readingItem.reference}`,
-        text: `${actor.name} commented on ${verseLabel} in ${readingItem.reference}.\n\nOpen the app: ${appUrl}`,
+      sendEmail(recipient, "COMMENT_REPLY", {
+        reference: readingItem.reference,
+        commenterName: actor.name,
+        commentText: `New comment on ${verseLabel} in ${readingItem.reference}`,
+        readingItemId: params.readingItemId,
+        groupId: readingItem.group_id,
       }),
     ),
   );
@@ -309,27 +303,28 @@ async function sendVerseReplyEmails(params: {
   ]);
   if (!actor || !readingItem) return;
 
-  const recipients = await dbQuery<{ email: string; name: string }>(
-    `SELECT DISTINCT u.email, u.name
+  const recipients = await dbQuery<EmailUser>(
+    `SELECT DISTINCT u.id, u.name, u.email, u.unsubscribe_token AS "unsubscribeToken"
      FROM annotation_replies ar
      JOIN users u ON u.id = ar.author_id
      WHERE ar.annotation_id = $1
        AND ar.deleted_at IS NULL
        AND ar.author_id <> $2
-       AND u.is_bot = FALSE`,
+       AND u.is_bot = FALSE
+       AND u.notify_email_comments = TRUE`,
     [params.annotationId, params.actorUserId],
   );
   if (recipients.length === 0) return;
 
   const verseLabel = getVerseLabel(params.startVerse, params.endVerse);
-  const appUrl = getAppUrl();
 
   await Promise.all(
     recipients.map((recipient) =>
-      sendEmail({
-        to: recipient.email,
-        subject: `Reply in a verse thread you joined`,
-        text: `${actor.name} replied on ${verseLabel} in ${readingItem.reference}.\n\nOpen the app: ${appUrl}`,
+      sendEmail(recipient, "COMMENT_REPLY", {
+        reference: readingItem.reference,
+        commenterName: actor.name,
+        commentText: `Reply on ${verseLabel} in ${readingItem.reference}`,
+        readingItemId: params.readingItemId,
       }),
     ),
   );
@@ -1476,17 +1471,14 @@ export async function createComment(params: {
     );
 
     // Fetch commenter name and reading reference for email context
-    const commentContext = await dbQueryOne<{
-      commenter_name: string;
-      reference: string;
-    }>(
-      `SELECT u.name as commenter_name, ri.reference
-       FROM users u
-       CROSS JOIN reading_items ri
-       WHERE u.id = $1 AND ri.id = $2`,
-      [params.userId, params.readingItemId],
-      client,
-    );
+    const [commenterRow, referenceRow] = await Promise.all([
+      dbQueryOne<{ name: string }>(`SELECT name FROM users WHERE id = $1`, [params.userId], client),
+      dbQueryOne<{ reference: string }>(`SELECT reference FROM reading_items WHERE id = $1`, [params.readingItemId], client),
+    ]);
+    const commentContext = {
+      commenter_name: commenterRow?.name,
+      reference: referenceRow?.reference,
+    };
 
     if (parentAuthorId && parentAuthorId !== params.userId) {
       await notifyUsers(

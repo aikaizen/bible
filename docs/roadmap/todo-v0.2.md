@@ -8,6 +8,31 @@ Target release: `v0.2`
 - Improve real-time collaboration in Reader + Discussion.
 - Harden security/ops for Supabase + Vercel production usage.
 
+## P0 - Voting / Selection Experience (Primetime)
+
+Captured 2026-08-14. Requirements as stated, not yet specced.
+
+- [ ] **Open proposals to all members.** Any member of a group can propose specific passages — not admin-only.
+- [ ] **Proposals are visible to everyone, capped per user.** Any proposed passage automatically appears for all users. Each user can propose up to 2 passages per week.
+- [ ] **Partial-verse highlighting in Reader.** Highlighting text must not auto-expand to the full verse when the selection is incomplete — highlight only the selected words. The comment still reads "Comment on verse 5" and stays tagged as such in the comments at the bottom.
+- [ ] **Remove the reroll button in the top right.**
+- [ ] **Replace "This week is resolved" with a rollover timer.** No resolved-state banner at the bottom. Instead show a countdown of days remaining until next week, when the verses in play switch and the current week is archived to history.
+- [ ] **Voting protects a passage from reroll.** Voting on a verse makes it non-rerollable; the reroll control for that passage goes gray.
+
+## P1 - Week History and Snapshot Impersonation
+
+- [ ] Maintain a history of past weeks, accessible from the right bar.
+- [ ] Snapshot each week exactly as it stood immediately before it ended and rolled over.
+- [ ] Clicking a snapshot enters an "impersonation" view of that week: all passages readable as they were, with full ability to comment and reply.
+- [ ] Changes made while impersonating are written back into that snapshot, so discussion on a past passage can continue.
+- [ ] While impersonating, show indicator text at the top next to the group name.
+
+## Parking Lot - Deferred Until After Primetime
+
+- [ ] Deacon AI assistant (`lib/deacon.ts`, Fireworks API, bot user, `docs/plans/deacon-ai-assistant.md`).
+- [ ] Super admin role and cross-group member management.
+- [ ] Email notifications via Resend (including `PASSAGE_READ` notification type and unsubscribe flow).
+
 ## P0 - Must Fix Before v0.2 Tag
 - [x] Add lifecycle integration tests for week creation, vote casting, auto-resolve, and new vote rounds.
 - [x] Add deterministic service tests for random fallback behavior (stub RNG for test mode).

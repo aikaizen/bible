@@ -2681,7 +2681,7 @@ export default function Home() {
                   ) : preferences ? (
                     <div className="stack-sm">
                       <div style={{ fontSize: 13, marginBottom: 12, color: "var(--text-secondary)", lineHeight: 1.5 }}>
-                        Stay connected with your reading community. Choose which updates you'd like to receive:
+                        Stay connected with your reading community. Choose which updates you&apos;d like to receive:
                       </div>
 
                       <label className="preference-row">
@@ -2693,7 +2693,7 @@ export default function Home() {
                         />
                         <span className="preference-label">
                           <strong>New week begins</strong>
-                          <span className="preference-desc">When voting opens for the upcoming week's reading</span>
+                          <span className="preference-desc">When voting opens for the upcoming week&apos;s reading</span>
                         </span>
                       </label>
 
@@ -2719,7 +2719,7 @@ export default function Home() {
                         />
                         <span className="preference-label">
                           <strong>Passage selected</strong>
-                          <span className="preference-desc">When this week's Scripture reading is chosen</span>
+                          <span className="preference-desc">When this week&apos;s Scripture reading is chosen</span>
                         </span>
                       </label>
 
