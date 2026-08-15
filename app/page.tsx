@@ -427,6 +427,8 @@ export default function Home() {
   const [selectedVerses, setSelectedVerses] = useState<{
     start: number; end: number; startOffset: number | null; endOffset: number | null;
   } | null>(null);
+  const [selectedQuote, setSelectedQuote] = useState("");
+  const [quoteCopied, setQuoteCopied] = useState(false);
   const [activeReadingItemId, setActiveReadingItemId] = useState<string | null>(null);
   const activeReadingItemIdRef = useRef<string | null>(null);
   const [myReadByItem, setMyReadByItem] = useState<Record<string, "NOT_MARKED" | "PLANNED" | "READ">>({});
@@ -857,6 +859,8 @@ export default function Home() {
       }
 
       setSelectedVerses({ start: startVerse, end: endVerse, startOffset, endOffset });
+      setSelectedQuote(sel.toString().replace(/\s+/g, " ").trim());
+      setQuoteCopied(false);
       setBottomSheetMode("new");
       setAnnotationText("");
       setBottomSheetOpen(true);
@@ -878,8 +882,30 @@ export default function Home() {
     setBottomSheetOpen(false);
     setActiveAnnotation(null);
     setSelectedVerses(null);
+    setSelectedQuote("");
+    setQuoteCopied(false);
     setAnnotationText("");
     setAnnotationReplyText("");
+  }
+
+  async function copySelectedQuote() {
+    const text = selectedQuote.trim();
+    if (!text) return;
+    try {
+      await navigator.clipboard.writeText(text);
+    } catch {
+      const field = document.createElement("textarea");
+      field.value = text;
+      field.setAttribute("readonly", "");
+      field.style.position = "fixed";
+      field.style.left = "-9999px";
+      document.body.appendChild(field);
+      field.select();
+      document.execCommand("copy");
+      document.body.removeChild(field);
+    }
+    setQuoteCopied(true);
+    window.setTimeout(() => setQuoteCopied(false), 1500);
   }
 
   function onClickHighlight(ann: Annotation) {
@@ -3167,9 +3193,19 @@ export default function Home() {
                       ? `verse ${selectedVerses.start}`
                       : `verses ${selectedVerses.start}\u2013${selectedVerses.end}`}
                   </div>
-                  <button className="icon-btn" onClick={closeBottomSheet} type="button">
-                    <IconX />
-                  </button>
+                  <div className="sheet-header-actions">
+                    <button
+                      className="btn btn-sm"
+                      onClick={() => void copySelectedQuote()}
+                      disabled={!selectedQuote}
+                      type="button"
+                    >
+                      {quoteCopied ? "Copied" : "Copy"}
+                    </button>
+                    <button className="icon-btn" onClick={closeBottomSheet} type="button">
+                      <IconX />
+                    </button>
+                  </div>
                 </div>
                 <textarea
                   className="textarea"

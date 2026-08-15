@@ -1514,6 +1514,13 @@ button, input, textarea, select {
   gap: 8px;
 }
 
+.sheet-header-actions {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  flex-shrink: 0;
+}
+
 .sheet-title {
   font-family: var(--font-display);
   font-size: 20px;
