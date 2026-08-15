@@ -85,9 +85,10 @@ button, input, textarea, select {
   letter-spacing: 0.5px;
   text-transform: uppercase;
   white-space: nowrap;
-  max-width: 40vw;
+  max-width: 52vw;
   overflow: hidden;
   text-overflow: ellipsis;
+  text-align: center;
 }
 
 .topbar-actions {
@@ -766,6 +767,86 @@ button, input, textarea, select {
   font-size: 11px;
   color: var(--text-tertiary);
   flex-shrink: 0;
+}
+
+.history-week {
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  background: var(--bg-surface);
+  overflow: hidden;
+}
+
+.history-week.viewing {
+  border-color: var(--gold-border);
+}
+
+.history-week-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  width: 100%;
+  padding: 14px 16px;
+  background: none;
+  border: 0;
+  color: inherit;
+  text-align: left;
+  cursor: pointer;
+}
+
+.history-passages {
+  border-top: 1px solid var(--border);
+}
+
+.history-passage {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 10px;
+  width: 100%;
+  padding: 10px 16px;
+  background: none;
+  border: 0;
+  border-top: 1px solid var(--border);
+  color: inherit;
+  text-align: left;
+  cursor: pointer;
+}
+
+.history-passage:first-child { border-top: 0; }
+.history-passage:hover { background: var(--bg-surface-hover); }
+
+.history-passage-ref {
+  font-size: 14px;
+  font-weight: 500;
+}
+
+.history-passage-meta {
+  font-size: 11px;
+  color: var(--text-tertiary);
+  flex-shrink: 0;
+}
+
+.impersonation-badge {
+  display: inline-block;
+  margin-left: 6px;
+  padding: 2px 8px;
+  border-radius: var(--radius-full);
+  background: var(--gold-dim);
+  border: 1px solid var(--gold-border);
+  color: var(--gold);
+  font-size: 10px;
+  font-weight: 600;
+  letter-spacing: 0.02em;
+  vertical-align: middle;
+  text-transform: none;
+}
+
+.impersonation-banner {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
 }
 
 /* ─── Group ─── */

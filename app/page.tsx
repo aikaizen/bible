@@ -113,6 +113,11 @@ type Snapshot = {
     weekId: string; startDate: string; reference: string;
     commentsCount: number; readCount: number;
   }>;
+  pendingInvites: Array<{
+    id: string; token: string | null; recipientName: string;
+    recipientContact: string | null; createdBy: string;
+    creatorName: string; createdAt: string;
+  }>;
 };
 
 type HistoryPassage = {
@@ -146,11 +151,6 @@ type ArchivedPassage = {
 type ArchivedWeek = {
   week: { id: string; startDate: string; status: string };
   passages: ArchivedPassage[];
-  pendingInvites: Array<{
-    id: string; token: string | null; recipientName: string;
-    recipientContact: string | null; createdBy: string;
-    creatorName: string; createdAt: string;
-  }>;
 };
 
 type Comment = {
@@ -208,21 +208,40 @@ type Annotation = {
   replies: AnnotationReply[];
 };
 
-function verseSegments(text: string, verse: number, anns: Annotation[]) {
+function verseSegments(
+  text: string,
+  verse: number,
+  anns: Annotation[],
+  preview?: { from: number; to: number } | null,
+) {
   const ranges = anns.map((a) => {
     const from = a.startVerse === verse && a.startOffset != null ? Math.min(a.startOffset, text.length) : 0;
     const to = a.endVerse === verse && a.endOffset != null ? Math.min(a.endOffset, text.length) : text.length;
     return { from: Math.min(from, to), to: Math.max(from, to), ann: a };
   }).filter((r) => r.to > r.from);
-  if (ranges.length === 0) return [{ text, ann: null as Annotation | null }];
 
-  const cuts = Array.from(new Set([0, text.length, ...ranges.flatMap((r) => [r.from, r.to])])).sort((a, b) => a - b);
-  const segs: Array<{ text: string; ann: Annotation | null }> = [];
+  let pv: { from: number; to: number } | null = null;
+  if (preview) {
+    const from = Math.max(0, Math.min(preview.from, text.length));
+    const to = Math.max(0, Math.min(preview.to, text.length));
+    if (to > from) pv = { from, to };
+  }
+
+  if (ranges.length === 0 && !pv) return [{ text, ann: null as Annotation | null, preview: false }];
+
+  const cutSet = new Set([0, text.length, ...ranges.flatMap((r) => [r.from, r.to])]);
+  if (pv) { cutSet.add(pv.from); cutSet.add(pv.to); }
+  const cuts = Array.from(cutSet).sort((a, b) => a - b);
+  const segs: Array<{ text: string; ann: Annotation | null; preview: boolean }> = [];
   for (let i = 0; i < cuts.length - 1; i++) {
     const from = cuts[i];
     const to = cuts[i + 1];
     const covering = ranges.find((r) => r.from <= from && r.to >= to);
-    segs.push({ text: text.slice(from, to), ann: covering?.ann ?? null });
+    segs.push({
+      text: text.slice(from, to),
+      ann: covering?.ann ?? null,
+      preview: pv ? pv.from <= from && pv.to >= to : false,
+    });
   }
   return segs;
 }
@@ -411,6 +430,9 @@ export default function Home() {
   const [activeReadingItemId, setActiveReadingItemId] = useState<string | null>(null);
   const activeReadingItemIdRef = useRef<string | null>(null);
   const [myReadByItem, setMyReadByItem] = useState<Record<string, "NOT_MARKED" | "PLANNED" | "READ">>({});
+  const [historyWeeks, setHistoryWeeks] = useState<HistoryWeek[]>([]);
+  const [archivedWeek, setArchivedWeek] = useState<ArchivedWeek | null>(null);
+  const archivedWeekRef = useRef<ArchivedWeek | null>(null);
   const [activeAnnotation, setActiveAnnotation] = useState<Annotation | null>(null);
   const [annotationText, setAnnotationText] = useState("");
   const [annotationReplyText, setAnnotationReplyText] = useState("");
@@ -463,9 +485,9 @@ export default function Home() {
     : 0;
 
   const currentReading = useMemo(() => {
-    if (!snapshot) return null;
+    const pool = archivedWeek?.passages ?? snapshot?.proposals ?? [];
     if (activeReadingItemId) {
-      const match = snapshot.proposals.find((p) => p.readingItemId === activeReadingItemId);
+      const match = pool.find((p) => p.readingItemId === activeReadingItemId);
       if (match?.readingItemId) {
         return {
           id: match.readingItemId,
@@ -476,8 +498,21 @@ export default function Home() {
         };
       }
     }
-    return snapshot.readingItem;
-  }, [snapshot, activeReadingItemId]);
+    if (archivedWeek) {
+      const first = archivedWeek.passages.find((p) => p.readingItemId);
+      if (first?.readingItemId) {
+        return {
+          id: first.readingItemId,
+          reference: first.reference,
+          proposalId: first.id,
+          note: first.note,
+          proposerName: first.proposerName,
+        };
+      }
+      return null;
+    }
+    return snapshot?.readingItem ?? null;
+  }, [snapshot, activeReadingItemId, archivedWeek]);
 
   function markForItem(
     marks: Snapshot["readMarks"],
@@ -553,12 +588,16 @@ export default function Home() {
     void loadBibleText(reference);
   }
 
-  function openPassage(p: Snapshot["proposals"][number]) {
+  function openPassage(
+    p: { readingItemId: string | null; reference: string },
+    opts?: { scoreRead?: boolean },
+  ) {
+    const scoreRead = opts?.scoreRead ?? !archivedWeekRef.current;
     if (p.readingItemId) {
       selectReadingItem(p.readingItemId);
       setReaderReference(null);
       void loadPassageDiscussion(p.readingItemId).catch(() => {});
-      markPassageRead(p.readingItemId);
+      if (scoreRead) markPassageRead(p.readingItemId);
     } else {
       setReaderReference(p.reference);
     }
@@ -583,28 +622,34 @@ export default function Home() {
     setSnapshot(payload);
     setInviteToken(payload.group.inviteToken ?? "");
 
-    const storedOpened = window.localStorage.getItem(openedReadingStorageKey(gId));
-    const candidate = activeReadingItemIdRef.current ?? storedOpened;
-    const stillValid = Boolean(
-      candidate && payload.proposals.some((p) => p.readingItemId === candidate),
-    );
-    const readingId = stillValid ? candidate : payload.readingItem?.id ?? null;
-    selectReadingItem(readingId, gId);
-
-    const readingMeta = readingId
-      ? payload.proposals.find((p) => p.readingItemId === readingId)
-      : null;
-    const readingRef = readingMeta?.reference ?? payload.readingItem?.reference ?? null;
-
-    if (readingId) {
-      await Promise.all([
-        loadPassageDiscussion(readingId),
-        readerReference ? Promise.resolve() : readingRef ? loadBibleText(readingRef) : Promise.resolve(),
-      ]);
+    if (archivedWeekRef.current) {
+      if (activeReadingItemIdRef.current) {
+        await loadPassageDiscussion(activeReadingItemIdRef.current).catch(() => {});
+      }
     } else {
-      setComments([]);
-      setAnnotations([]);
-      if (!readerReference) setBibleText(null);
+      const storedOpened = window.localStorage.getItem(openedReadingStorageKey(gId));
+      const candidate = activeReadingItemIdRef.current ?? storedOpened;
+      const stillValid = Boolean(
+        candidate && payload.proposals.some((p) => p.readingItemId === candidate),
+      );
+      const readingId = stillValid ? candidate : payload.readingItem?.id ?? null;
+      selectReadingItem(readingId, gId);
+
+      const readingMeta = readingId
+        ? payload.proposals.find((p) => p.readingItemId === readingId)
+        : null;
+      const readingRef = readingMeta?.reference ?? payload.readingItem?.reference ?? null;
+
+      if (readingId) {
+        await Promise.all([
+          loadPassageDiscussion(readingId),
+          readerReference ? Promise.resolve() : readingRef ? loadBibleText(readingRef) : Promise.resolve(),
+        ]);
+      } else {
+        setComments([]);
+        setAnnotations([]);
+        if (!readerReference) setBibleText(null);
+      }
     }
 
     const n = await api<{ notifications: NotificationItem[] }>(`/api/users/me/notifications`);
@@ -618,12 +663,56 @@ export default function Home() {
     return payload.groups;
   }
 
+  async function loadHistory(gId = groupId) {
+    if (!gId) return;
+    try {
+      const data = await api<{ history: HistoryWeek[] }>(`/api/groups/${gId}/history`);
+      setHistoryWeeks(data.history);
+    } catch { /* ignore */ }
+  }
+
+  function setImpersonation(week: ArchivedWeek | null) {
+    setArchivedWeek(week);
+    archivedWeekRef.current = week;
+  }
+
+  async function enterArchivedWeek(weekId: string, readingItemId?: string) {
+    if (!groupId) return;
+    try {
+      setSubmitting(true);
+      const data = await api<ArchivedWeek>(`/api/groups/${groupId}/history/${weekId}`);
+      setImpersonation(data);
+      const target = readingItemId
+        ? data.passages.find((p) => p.readingItemId === readingItemId)
+        : data.passages.find((p) => p.readingItemId);
+      if (target) openPassage(target, { scoreRead: false });
+      else setTab("reading");
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "Failed to open past week");
+    } finally {
+      setSubmitting(false);
+    }
+  }
+
+  function exitArchivedWeek() {
+    setImpersonation(null);
+    setReaderReference(null);
+    const liveId = snapshot?.readingItem?.id ?? snapshot?.proposals.find((p) => p.readingItemId)?.readingItemId ?? null;
+    selectReadingItem(liveId);
+    if (snapshot?.readingItem) {
+      void loadPassageDiscussion(snapshot.readingItem.id).catch(() => {});
+      void loadBibleText(snapshot.readingItem.reference);
+    }
+    setTab("reading");
+  }
+
   async function refreshData(group = groupId) {
     if (!group) return;
     try {
       setError("");
       setMembershipError("");
       await loadSnapshot(group);
+      void loadHistory(group);
     } catch (err) {
       const message = err instanceof Error ? err.message : "Failed to refresh";
       if (message.toLowerCase().includes("not a member")) {
@@ -653,6 +742,7 @@ export default function Home() {
         if (initialGroupId) {
           window.localStorage.setItem("bible-app-group-id", initialGroupId);
           await loadSnapshot(initialGroupId);
+          void loadHistory(initialGroupId);
         }
       } catch (err) {
         setError(err instanceof Error ? err.message : "Failed to load app");
@@ -703,17 +793,30 @@ export default function Home() {
     }
 
     if (startVerse !== null && endVerse !== null) {
-      function offsetWithinVerse(span: HTMLSpanElement, node: Node, nodeOffset: number): number {
-        let total = 0;
-        const walker = document.createTreeWalker(span, NodeFilter.SHOW_TEXT, {
+      function verseTextWalker(span: HTMLSpanElement) {
+        return document.createTreeWalker(span, NodeFilter.SHOW_TEXT, {
           acceptNode: (t) =>
             t.parentElement?.closest("sup") ? NodeFilter.FILTER_REJECT : NodeFilter.FILTER_ACCEPT,
         });
+      }
+
+      function offsetWithinVerse(span: HTMLSpanElement, node: Node, nodeOffset: number): number {
+        let total = 0;
+        const walker = verseTextWalker(span);
         for (let t = walker.nextNode(); t; t = walker.nextNode()) {
           if (t === node) return total + nodeOffset;
           total += t.textContent?.length ?? 0;
         }
         return total;
+      }
+
+      // Same text the renderer sees (v.text), plus the trailing space rendered
+      // outside the segment spans — indices stay aligned with v.text.
+      function verseTextOf(span: HTMLSpanElement): string {
+        let out = "";
+        const walker = verseTextWalker(span);
+        for (let t = walker.nextNode(); t; t = walker.nextNode()) out += t.textContent ?? "";
+        return out;
       }
 
       const startSpan = container.querySelector<HTMLSpanElement>(`[data-verse="${startVerse}"]`);
@@ -726,6 +829,33 @@ export default function Home() {
       if (endSpan && endSpan.contains(range.endContainer)) {
         endOffset = offsetWithinVerse(endSpan, range.endContainer, range.endOffset);
       }
+
+      // Snap outward to whole-word boundaries so highlights never cut a word.
+      if (startOffset != null && startSpan) {
+        const t = verseTextOf(startSpan);
+        let s = Math.max(0, Math.min(startOffset, t.length));
+        while (s > 0 && !/\s/.test(t[s - 1])) s--;
+        startOffset = s;
+      }
+      if (endOffset != null && endSpan) {
+        const t = verseTextOf(endSpan);
+        const max = t.replace(/\s+$/, "").length;
+        let e = Math.max(0, Math.min(endOffset, t.length));
+        while (e < t.length && !/\s/.test(t[e])) e++;
+        endOffset = Math.min(e, max);
+      }
+      // Whitespace-only selection within one verse: fall back to the whole verse
+      // rather than posting an empty range (the server rejects end <= start).
+      if (
+        startVerse === endVerse &&
+        startOffset != null &&
+        endOffset != null &&
+        endOffset <= startOffset
+      ) {
+        startOffset = null;
+        endOffset = null;
+      }
+
       setSelectedVerses({ start: startVerse, end: endVerse, startOffset, endOffset });
       setBottomSheetMode("new");
       setAnnotationText("");
@@ -1104,6 +1234,7 @@ export default function Home() {
     window.localStorage.setItem("bible-app-group-id", newGId);
     selectReadingItem(null);
     setReaderReference(null);
+    setImpersonation(null);
     void refreshData(newGId);
   }
 
@@ -1520,6 +1651,11 @@ export default function Home() {
         <div className="topbar-brand">Read the Bible Together</div>
         <div className="topbar-group">
           {snapshot?.group.name ?? ""}
+          {archivedWeek && (
+            <span className="impersonation-badge">
+              Viewing week of {toDateLabel(archivedWeek.week.startDate)}
+            </span>
+          )}
           {isSuperAdmin && <span className="super-admin-badge">Admin</span>}
         </div>
         <div className="topbar-actions">
@@ -1587,6 +1723,14 @@ export default function Home() {
               Sign Out
             </button>
           </div>
+          <button
+            className="btn btn-sm"
+            style={{ width: "100%", marginTop: 8 }}
+            onClick={() => { setTab("history"); setDrawerOpen(false); }}
+            type="button"
+          >
+            Past weeks
+          </button>
         </div>
 
         {/* Group switcher */}
@@ -1823,7 +1967,37 @@ export default function Home() {
         {snapshot && (
           <>
             {/* ── VOTE TAB ── */}
-            {tab === "vote" && (
+            {tab === "vote" && archivedWeek && (
+              <section className="stack fade-in">
+                <div className="card impersonation-banner">
+                  <div>
+                    <div className="section-title">Week of {toDateLabel(archivedWeek.week.startDate)}</div>
+                    <div className="text-tertiary" style={{ fontSize: 12 }}>
+                      Archived passages. Comments you add are saved to this week.
+                    </div>
+                  </div>
+                  <button className="btn btn-sm" type="button" onClick={exitArchivedWeek}>
+                    Back to this week
+                  </button>
+                </div>
+                {archivedWeek.passages.map((p) => (
+                  <div key={p.id} className="proposal">
+                    <div className="proposal-ref">{p.reference}</div>
+                    {p.note && <div className="proposal-note">{p.note}</div>}
+                    <div className="proposal-meta">
+                      {p.isSeed ? "System suggestion" : `Proposed by ${p.proposerName}`}
+                      {p.voteCount > 0 && <> &middot; {p.voteCount} vote{p.voteCount === 1 ? "" : "s"}</>}
+                    </div>
+                    <div className="proposal-actions">
+                      <button className="btn btn-sm" type="button" onClick={() => openPassage(p, { scoreRead: false })}>
+                        Read
+                      </button>
+                    </div>
+                  </div>
+                ))}
+              </section>
+            )}
+            {tab === "vote" && !archivedWeek && (
               <section className="stack fade-in">
                 <div className="row-between">
                   <div>
@@ -2088,6 +2262,16 @@ export default function Home() {
             {/* ── READING TAB ── */}
             {tab === "reading" && (
               <section className="stack fade-in">
+                {archivedWeek && (
+                  <div className="card impersonation-banner">
+                    <div className="text-tertiary" style={{ fontSize: 12 }}>
+                      Reading the week of {toDateLabel(archivedWeek.week.startDate)}. New comments stay on this week.
+                    </div>
+                    <button className="btn btn-sm" type="button" onClick={exitArchivedWeek}>
+                      Back to this week
+                    </button>
+                  </div>
+                )}
                 {!currentReading && !readerReference ? (
                   <div className="empty">
                     <svg className="empty-icon" viewBox="0 0 24 24"><path d="M2 3h6a4 4 0 014 4v14a3 3 0 00-3-3H2z" /><path d="M22 3h-6a4 4 0 00-4 4v14a3 3 0 013-3h7z" /></svg>
@@ -2109,7 +2293,8 @@ export default function Home() {
                       {!readerReference && currentReading && (
                         <>
                           <div className="text-tertiary" style={{ fontSize: 10, letterSpacing: 1.2, textTransform: "uppercase", fontWeight: 600 }}>
-                            Week of {toDateLabel(snapshot.week.startDate)}
+                            Week of {toDateLabel(archivedWeek?.week.startDate ?? snapshot.week.startDate)}
+                            {archivedWeek ? " · archived" : ""}
                           </div>
                           {currentReading.note && <div className="text-muted">{currentReading.note}</div>}
                           {currentReading.proposerName && (
@@ -2130,19 +2315,27 @@ export default function Home() {
                           <div className="bible-verses" ref={versesRef}>
                             {bibleText.verses.map((v) => {
                               const anns = verseAnnotationMap[v.verse] ?? [];
-                              const isSelecting = selectedVerses &&
+                              const isSelecting = !!selectedVerses &&
                                 v.verse >= selectedVerses.start &&
                                 v.verse <= selectedVerses.end &&
                                 bottomSheetOpen && bottomSheetMode === "new";
+                              const previewRange = isSelecting && selectedVerses
+                                ? {
+                                    from: v.verse === selectedVerses.start ? (selectedVerses.startOffset ?? 0) : 0,
+                                    to: v.verse === selectedVerses.end ? (selectedVerses.endOffset ?? v.text.length) : v.text.length,
+                                  }
+                                : null;
                               return (
                                 <span
                                   key={v.verse}
                                   data-verse={v.verse}
-                                  className={`bible-verse${isSelecting ? " verse-selecting" : ""}`}
+                                  className="bible-verse"
                                 >
                                   <sup className="verse-num">{v.verse}</sup>
-                                  {verseSegments(v.text, v.verse, anns).map((seg, i) =>
-                                    seg.ann ? (
+                                  {verseSegments(v.text, v.verse, anns, previewRange).map((seg, i) =>
+                                    seg.preview ? (
+                                      <span key={i} className="verse-selecting">{seg.text}</span>
+                                    ) : seg.ann ? (
                                       <span
                                         key={i}
                                         className="verse-highlighted"
@@ -2457,25 +2650,62 @@ export default function Home() {
             {/* ── HISTORY TAB ── */}
             {tab === "history" && (
               <section className="stack fade-in">
-                <div className="section-title">Past Readings</div>
-                {snapshot.history.length === 0 && (
+                <div className="row-between">
+                  <div className="section-title">Past Weeks</div>
+                  {archivedWeek && (
+                    <button className="btn btn-sm" type="button" onClick={exitArchivedWeek}>
+                      This week
+                    </button>
+                  )}
+                </div>
+                {historyWeeks.length === 0 && (
                   <div className="empty">
                     <svg className="empty-icon" viewBox="0 0 24 24"><circle cx="12" cy="12" r="10" /><polyline points="12,6 12,12 16,14" /></svg>
-                    No archived weeks yet.
+                    No archived weeks yet. When this week rolls over, it will appear here.
                   </div>
                 )}
-                {snapshot.history.map((item) => (
-                  <div key={item.weekId} className="history-item">
-                    <div>
-                      <div className="history-ref">{item.reference}</div>
-                      <div className="history-meta">Week of {toDateLabel(item.startDate)}</div>
+                {historyWeeks.map((week) => {
+                  const comments = week.passages.reduce((n, p) => n + p.commentsCount, 0);
+                  const reads = week.passages.reduce((n, p) => n + p.readCount, 0);
+                  const viewing = archivedWeek?.week.id === week.weekId;
+                  return (
+                    <div key={week.weekId} className={`history-week${viewing ? " viewing" : ""}`}>
+                      <button
+                        type="button"
+                        className="history-week-header"
+                        onClick={() => void enterArchivedWeek(week.weekId)}
+                      >
+                        <div>
+                          <div className="history-ref">Week of {toDateLabel(week.startDate)}</div>
+                          <div className="history-meta">
+                            {week.passages.length} passage{week.passages.length === 1 ? "" : "s"}
+                            {" · "}{comments} comment{comments === 1 ? "" : "s"}
+                            {" · "}{reads} read
+                          </div>
+                        </div>
+                        <span className="text-tertiary" style={{ fontSize: 12 }}>
+                          {viewing ? "Viewing" : "Open"}
+                        </span>
+                      </button>
+                      <div className="history-passages">
+                        {week.passages.map((p) => (
+                          <button
+                            key={p.readingItemId}
+                            type="button"
+                            className="history-passage"
+                            onClick={() => void enterArchivedWeek(week.weekId, p.readingItemId)}
+                          >
+                            <span className="history-passage-ref">{p.reference}</span>
+                            <span className="history-passage-meta">
+                              {p.voteCount} vote{p.voteCount === 1 ? "" : "s"}
+                              {p.commentsCount > 0 ? ` · ${p.commentsCount} comments` : ""}
+                            </span>
+                          </button>
+                        ))}
+                      </div>
                     </div>
-                    <div className="history-stats">
-                      <div>{item.commentsCount} comments</div>
-                      <div>{item.readCount} read</div>
-                    </div>
-                  </div>
-                ))}
+                  );
+                })}
               </section>
             )}
 

@@ -24,11 +24,11 @@ Captured 2026-08-14. Requirements as stated, not yet specced.
 
 ## P1 - Week History and Snapshot Impersonation
 
-- [ ] Maintain a history of past weeks, accessible from the right bar.
-- [ ] Snapshot each week exactly as it stood immediately before it ended and rolled over.
-- [ ] Clicking a snapshot enters an "impersonation" view of that week: all passages readable as they were, with full ability to comment and reply.
-- [ ] Changes made while impersonating are written back into that snapshot, so discussion on a past passage can continue.
-- [ ] While impersonating, show indicator text at the top next to the group name.
+- [x] Maintain a history of past weeks, accessible from the right bar.
+- [x] Snapshot each week exactly as it stood immediately before it ended and rolled over.
+- [x] Clicking a snapshot enters an "impersonation" view of that week: all passages readable as they were, with full ability to comment and reply.
+- [x] Changes made while impersonating are written back into that snapshot, so discussion on a past passage can continue.
+- [x] While impersonating, show indicator text at the top next to the group name.
 
 ## Parking Lot - Deferred Until After Primetime
 
