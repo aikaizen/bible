@@ -66,23 +66,8 @@ function getBookSuggestions(input: string): string[] {
   ).slice(0, 5);
 }
 
-function verseSegments(text: string, verse: number, anns: Annotation[]) {
-  const ranges = anns.map((a) => {
-    const from = a.startVerse === verse && a.startOffset != null ? Math.min(a.startOffset, text.length) : 0;
-    const to = a.endVerse === verse && a.endOffset != null ? Math.min(a.endOffset, text.length) : text.length;
-    return { from: Math.min(from, to), to: Math.max(from, to), ann: a };
-  }).filter((r) => r.to > r.from);
-  if (ranges.length === 0) return [{ text, ann: null as Annotation | null }];
-
-  const cuts = Array.from(new Set([0, text.length, ...ranges.flatMap((r) => [r.from, r.to])])).sort((a, b) => a - b);
-  const segs: Array<{ text: string; ann: Annotation | null }> = [];
-  for (let i = 0; i < cuts.length - 1; i++) {
-    const from = cuts[i];
-    const to = cuts[i + 1];
-    const covering = ranges.find((r) => r.from <= from && r.to >= to);
-    segs.push({ text: text.slice(from, to), ann: covering?.ann ?? null });
-  }
-  return segs;
+function openedReadingStorageKey(groupId: string): string {
+  return `bible-app-opened-reading:${groupId}`;
 }
 
 /* ─── Types ─── */
@@ -186,6 +171,25 @@ type Annotation = {
   text: string; createdAt: string; canDelete: boolean;
   replies: AnnotationReply[];
 };
+
+function verseSegments(text: string, verse: number, anns: Annotation[]) {
+  const ranges = anns.map((a) => {
+    const from = a.startVerse === verse && a.startOffset != null ? Math.min(a.startOffset, text.length) : 0;
+    const to = a.endVerse === verse && a.endOffset != null ? Math.min(a.endOffset, text.length) : text.length;
+    return { from: Math.min(from, to), to: Math.max(from, to), ann: a };
+  }).filter((r) => r.to > r.from);
+  if (ranges.length === 0) return [{ text, ann: null as Annotation | null }];
+
+  const cuts = Array.from(new Set([0, text.length, ...ranges.flatMap((r) => [r.from, r.to])])).sort((a, b) => a - b);
+  const segs: Array<{ text: string; ann: Annotation | null }> = [];
+  for (let i = 0; i < cuts.length - 1; i++) {
+    const from = cuts[i];
+    const to = cuts[i + 1];
+    const covering = ranges.find((r) => r.from <= from && r.to >= to);
+    segs.push({ text: text.slice(from, to), ann: covering?.ann ?? null });
+  }
+  return segs;
+}
 
 /* ─── Icons (inline SVG) ─── */
 
@@ -370,6 +374,7 @@ export default function Home() {
   } | null>(null);
   const [activeReadingItemId, setActiveReadingItemId] = useState<string | null>(null);
   const activeReadingItemIdRef = useRef<string | null>(null);
+  const [myReadByItem, setMyReadByItem] = useState<Record<string, "NOT_MARKED" | "PLANNED" | "READ">>({});
   const [activeAnnotation, setActiveAnnotation] = useState<Annotation | null>(null);
   const [annotationText, setAnnotationText] = useState("");
   const [annotationReplyText, setAnnotationReplyText] = useState("");
@@ -415,11 +420,6 @@ export default function Home() {
     [snapshot?.proposals],
   );
 
-  const myReadStatus = useMemo(() => {
-    if (!snapshot || !selectedUserId) return "NOT_MARKED";
-    return snapshot.readMarks.find((m) => m.userId === selectedUserId)?.status ?? "NOT_MARKED";
-  }, [selectedUserId, snapshot]);
-
   const isAdmin = snapshot?.myRole === "OWNER" || snapshot?.myRole === "ADMIN";
 
   const myProposalCount = snapshot
@@ -442,6 +442,17 @@ export default function Home() {
     }
     return snapshot.readingItem;
   }, [snapshot, activeReadingItemId]);
+
+  const myReadStatus = useMemo(() => {
+    if (!currentReading || !selectedUserId) return "NOT_MARKED";
+    if (Object.prototype.hasOwnProperty.call(myReadByItem, currentReading.id)) {
+      return myReadByItem[currentReading.id];
+    }
+    if (snapshot?.readingItem?.id === currentReading.id) {
+      return snapshot.readMarks.find((m) => m.userId === selectedUserId)?.status ?? "NOT_MARKED";
+    }
+    return "NOT_MARKED";
+  }, [currentReading, selectedUserId, myReadByItem, snapshot]);
 
   const topVotedProposalId = useMemo(() => {
     if (!snapshot || snapshot.proposals.length === 0) return null;
@@ -475,9 +486,21 @@ export default function Home() {
     }
   }
 
-  function selectReadingItem(id: string | null) {
+  function selectReadingItem(id: string | null, persistForGroup = groupId) {
     setActiveReadingItemId(id);
     activeReadingItemIdRef.current = id;
+    if (id && persistForGroup) {
+      window.localStorage.setItem(openedReadingStorageKey(persistForGroup), id);
+    }
+  }
+
+  async function loadPassageDiscussion(readingItemId: string) {
+    const [c, a] = await Promise.all([
+      api<{ comments: Comment[] }>(`/api/reading-items/${readingItemId}/comments`),
+      api<{ annotations: Annotation[] }>(`/api/reading-items/${readingItemId}/annotations`),
+    ]);
+    setComments(c.comments);
+    setAnnotations(a.annotations);
   }
 
   function openInReader(reference: string) {
@@ -487,32 +510,24 @@ export default function Home() {
   }
 
   function openPassage(p: Snapshot["proposals"][number]) {
-    if (p.readingItemId) selectReadingItem(p.readingItemId);
-    setReaderReference(null);
+    if (p.readingItemId) {
+      selectReadingItem(p.readingItemId);
+      setReaderReference(null);
+      void loadPassageDiscussion(p.readingItemId).catch(() => {});
+    } else {
+      setReaderReference(p.reference);
+    }
     setTab("reading");
     void loadBibleText(p.reference);
-    if (p.readingItemId) {
-      void (async () => {
-        try {
-          const [c, a] = await Promise.all([
-            api<{ comments: Comment[] }>(`/api/reading-items/${p.readingItemId}/comments`),
-            api<{ annotations: Annotation[] }>(`/api/reading-items/${p.readingItemId}/annotations`),
-          ]);
-          setComments(c.comments);
-          setAnnotations(a.annotations);
-        } catch { /* ignore */ }
-      })();
-    }
   }
 
   function goToWeekReading() {
     setReaderReference(null);
     if (currentReading) void loadBibleText(currentReading.reference);
-    else if (snapshot?.readingItem) void loadBibleText(snapshot.readingItem.reference);
   }
 
   function navigateReader(delta: number) {
-    const current = readerReference ?? currentReading?.reference ?? snapshot?.readingItem?.reference;
+    const current = readerReference ?? currentReading?.reference;
     if (!current) return;
     const next = navigateChapter(current, delta);
     if (next) openInReader(next);
@@ -523,12 +538,13 @@ export default function Home() {
     setSnapshot(payload);
     setInviteToken(payload.group.inviteToken ?? "");
 
-    const stillValid = activeReadingItemIdRef.current
-      && payload.proposals.some((p) => p.readingItemId === activeReadingItemIdRef.current);
-    const readingId = stillValid
-      ? activeReadingItemIdRef.current
-      : payload.readingItem?.id ?? null;
-    selectReadingItem(readingId);
+    const storedOpened = window.localStorage.getItem(openedReadingStorageKey(gId));
+    const candidate = activeReadingItemIdRef.current ?? storedOpened;
+    const stillValid = Boolean(
+      candidate && payload.proposals.some((p) => p.readingItemId === candidate),
+    );
+    const readingId = stillValid ? candidate : payload.readingItem?.id ?? null;
+    selectReadingItem(readingId, gId);
 
     const readingMeta = readingId
       ? payload.proposals.find((p) => p.readingItemId === readingId)
@@ -536,13 +552,10 @@ export default function Home() {
     const readingRef = readingMeta?.reference ?? payload.readingItem?.reference ?? null;
 
     if (readingId) {
-      const [c, a] = await Promise.all([
-        api<{ comments: Comment[] }>(`/api/reading-items/${readingId}/comments`),
-        api<{ annotations: Annotation[] }>(`/api/reading-items/${readingId}/annotations`),
+      await Promise.all([
+        loadPassageDiscussion(readingId),
         readerReference ? Promise.resolve() : readingRef ? loadBibleText(readingRef) : Promise.resolve(),
       ]);
-      setComments(c.comments);
-      setAnnotations(a.annotations);
     } else {
       setComments([]);
       setAnnotations([]);
@@ -701,14 +714,17 @@ export default function Home() {
     setBottomSheetOpen(true);
   }
 
-  async function loadAnnotations() {
-    if (!currentReading) return;
+  async function loadAnnotations(): Promise<Annotation[] | null> {
+    if (!currentReading) return null;
     try {
       const a = await api<{ annotations: Annotation[] }>(
         `/api/reading-items/${currentReading.id}/annotations`,
       );
       setAnnotations(a.annotations);
-    } catch { /* ignore */ }
+      return a.annotations;
+    } catch {
+      return null;
+    }
   }
 
   function onCreateAnnotation() {
@@ -737,7 +753,8 @@ export default function Home() {
   }
 
   function onCreateAnnotationReply() {
-    if (!activeAnnotation || !annotationReplyText.trim()) return;
+    if (!activeAnnotation || !annotationReplyText.trim() || !currentReading) return;
+    const readingItemId = currentReading.id;
     void (async () => {
       try {
         setSubmitting(true);
@@ -746,10 +763,8 @@ export default function Home() {
           body: JSON.stringify({ text: annotationReplyText.trim() }),
         });
         setAnnotationReplyText("");
-        await loadAnnotations();
-        // Refresh the active annotation
         const updated = await api<{ annotations: Annotation[] }>(
-          `/api/reading-items/${currentReading!.id}/annotations`,
+          `/api/reading-items/${readingItemId}/annotations`,
         );
         setAnnotations(updated.annotations);
         const refreshed = updated.annotations.find((a) => a.id === activeAnnotation.id);
@@ -778,16 +793,17 @@ export default function Home() {
   }
 
   function onDeleteAnnotationReply(replyId: string) {
+    if (!currentReading) return;
+    const readingItemId = currentReading.id;
     void (async () => {
       try {
         setSubmitting(true);
         await api(`/api/annotation-replies/${replyId}`, { method: "DELETE" });
-        await loadAnnotations();
+        const updated = await api<{ annotations: Annotation[] }>(
+          `/api/reading-items/${readingItemId}/annotations`,
+        );
+        setAnnotations(updated.annotations);
         if (activeAnnotation) {
-          const updated = await api<{ annotations: Annotation[] }>(
-            `/api/reading-items/${snapshot!.readingItem!.id}/annotations`,
-          );
-          setAnnotations(updated.annotations);
           const refreshed = updated.annotations.find((a) => a.id === activeAnnotation.id);
           if (refreshed) setActiveAnnotation(refreshed);
         }
@@ -1100,11 +1116,22 @@ export default function Home() {
 
   function onReadMark(status: "NOT_MARKED" | "PLANNED" | "READ") {
     if (!selectedUserId || !currentReading) return;
+    const itemId = currentReading.id;
+    setMyReadByItem((prev) => ({ ...prev, [itemId]: status }));
     void mutate(async () => {
-      await api(`/api/reading-items/${currentReading.id}/read-mark`, {
-        method: "POST",
-        body: JSON.stringify({ status }),
-      });
+      try {
+        await api(`/api/reading-items/${itemId}/read-mark`, {
+          method: "POST",
+          body: JSON.stringify({ status }),
+        });
+      } catch (err) {
+        setMyReadByItem((prev) => {
+          const next = { ...prev };
+          delete next[itemId];
+          return next;
+        });
+        throw err;
+      }
     });
   }
 
@@ -2005,42 +2032,39 @@ export default function Home() {
             {/* ── READING TAB ── */}
             {tab === "reading" && (
               <section className="stack fade-in">
-                {!snapshot.readingItem && !readerReference ? (
+                {!currentReading && !readerReference ? (
                   <div className="empty">
                     <svg className="empty-icon" viewBox="0 0 24 24"><path d="M2 3h6a4 4 0 014 4v14a3 3 0 00-3-3H2z" /><path d="M22 3h-6a4 4 0 00-4 4v14a3 3 0 013-3h7z" /></svg>
-                    Waiting for the vote to resolve. Discussion opens once a passage is selected.
+                    No passage open. Open one from this week&apos;s list.
                   </div>
                 ) : (
                   <>
-                    {/* Back to week's reading */}
-                    {readerReference && snapshot.readingItem && readerReference !== snapshot.readingItem.reference && (
+                    {readerReference && currentReading && readerReference !== currentReading.reference && (
                       <button
                         type="button"
                         className="btn btn-sm reader-back-btn"
                         onClick={goToWeekReading}
                       >
-                        ← Back to this week&apos;s reading ({snapshot.readingItem.reference})
+                        ← Back to {currentReading.reference}
                       </button>
                     )}
 
-                    {/* Reading card */}
                     <div className="card stack">
-                      {!readerReference && snapshot.readingItem && (
+                      {!readerReference && currentReading && (
                         <>
                           <div className="text-tertiary" style={{ fontSize: 10, letterSpacing: 1.2, textTransform: "uppercase", fontWeight: 600 }}>
                             Week of {toDateLabel(snapshot.week.startDate)}
                           </div>
-                          {snapshot.readingItem.note && <div className="text-muted">{snapshot.readingItem.note}</div>}
-                          {snapshot.readingItem.proposerName && (
-                            <div className="text-tertiary" style={{ fontSize: 12 }}>Proposed by {snapshot.readingItem.proposerName}</div>
+                          {currentReading.note && <div className="text-muted">{currentReading.note}</div>}
+                          {currentReading.proposerName && (
+                            <div className="text-tertiary" style={{ fontSize: 12 }}>Proposed by {currentReading.proposerName}</div>
                           )}
                         </>
                       )}
                       <div className="section-title">
-                        {readerReference ?? snapshot.readingItem?.reference}
+                        {readerReference ?? currentReading?.reference}
                       </div>
 
-                      {/* Bible Text */}
                       {bibleLoading && (
                         <div className="bible-loading">Loading passage...</div>
                       )}
@@ -2049,26 +2073,35 @@ export default function Home() {
                           <div className="bible-translation">{bibleText.translation}</div>
                           <div className="bible-verses" ref={versesRef}>
                             {bibleText.verses.map((v) => {
-                              const anns = verseAnnotationMap[v.verse];
-                              const isHighlighted = anns && anns.length > 0;
+                              const anns = verseAnnotationMap[v.verse] ?? [];
                               const isSelecting = selectedVerses &&
                                 v.verse >= selectedVerses.start &&
                                 v.verse <= selectedVerses.end &&
                                 bottomSheetOpen && bottomSheetMode === "new";
-                              const highlightColor = isHighlighted ? colorFor(anns[0].authorId) : undefined;
                               return (
                                 <span
                                   key={v.verse}
                                   data-verse={v.verse}
-                                  className={`bible-verse${isHighlighted ? " verse-highlighted" : ""}${isSelecting ? " verse-selecting" : ""}`}
-                                  style={isHighlighted ? { "--hl-color": highlightColor } as React.CSSProperties : undefined}
-                                  onClick={isHighlighted ? (e) => {
-                                    e.stopPropagation();
-                                    onClickHighlight(anns[0]);
-                                  } : undefined}
+                                  className={`bible-verse${isSelecting ? " verse-selecting" : ""}`}
                                 >
                                   <sup className="verse-num">{v.verse}</sup>
-                                  {v.text}{" "}
+                                  {verseSegments(v.text, v.verse, anns).map((seg, i) =>
+                                    seg.ann ? (
+                                      <span
+                                        key={i}
+                                        className="verse-highlighted"
+                                        style={{ "--hl-color": colorFor(seg.ann.authorId) } as React.CSSProperties}
+                                        onClick={(e) => {
+                                          e.stopPropagation();
+                                          onClickHighlight(seg.ann!);
+                                        }}
+                                      >
+                                        {seg.text}
+                                      </span>
+                                    ) : (
+                                      <span key={i}>{seg.text}</span>
+                                    ),
+                                  )}{" "}
                                 </span>
                               );
                             })}
@@ -2083,16 +2116,18 @@ export default function Home() {
                       {!bibleLoading && bibleText === null && (
                         <button
                           className="btn btn-sm"
-                          onClick={() => loadBibleText(readerReference ?? snapshot.readingItem!.reference)}
+                          onClick={() => {
+                            const ref = readerReference ?? currentReading?.reference;
+                            if (ref) void loadBibleText(ref);
+                          }}
                           type="button"
                         >
                           Load passage text
                         </button>
                       )}
 
-                      {/* Chapter navigation */}
                       {(() => {
-                        const cur = readerReference ?? snapshot.readingItem?.reference ?? "";
+                        const cur = readerReference ?? currentReading?.reference ?? "";
                         const prevRef = navigateChapter(cur, -1);
                         const nextRef = navigateChapter(cur, 1);
                         if (!prevRef && !nextRef) return null;
@@ -2118,8 +2153,7 @@ export default function Home() {
                         );
                       })()}
 
-                      {/* Read status + member statuses — only for week's assigned reading */}
-                      {!readerReference && snapshot.readingItem && (
+                      {!readerReference && currentReading && (
                         <>
                           <div className="read-pills">
                             <button
@@ -2145,6 +2179,7 @@ export default function Home() {
                             </button>
                           </div>
 
+                          {snapshot.readingItem?.id === currentReading.id && (
                           <div>
                             {snapshot.members.map((m) => {
                               const st = snapshot.readMarks.find((rm) => rm.userId === m.id)?.status ?? "NOT_MARKED";
@@ -2160,11 +2195,12 @@ export default function Home() {
                               );
                             })}
                           </div>
+                          )}
                         </>
                       )}
                     </div>
 
-                    {/* Discussion — unified comments + annotations */}
+                    {currentReading && (
                     <div className="card stack">
                       <div className="row-between">
                         <div className="section-title" style={{ fontSize: 20 }}>Discussion</div>
@@ -2358,6 +2394,7 @@ export default function Home() {
                         })()}
                       </div>
                     </div>
+                    )}
                   </>
                 )}
               </section>

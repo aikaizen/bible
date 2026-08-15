@@ -1337,6 +1337,10 @@ button, input, textarea, select {
   border-bottom: 2px solid color-mix(in srgb, var(--hl-color, var(--gold)) 45%, transparent);
 }
 
+.bible-verse .verse-highlighted {
+  display: inline;
+}
+
 .verse-highlighted:hover {
   background: color-mix(in srgb, var(--hl-color, var(--gold)) 28%, transparent);
 }
@@ -1946,3 +1950,13 @@ button, input, textarea, select {
   gap: 10px;
   padding: 6px 0;
 }
+
+.rollover-timer { text-align: center; }
+.rollover-timer-label {
+  font-size: 12px;
+  color: var(--text-tertiary);
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+}
+.rollover-timer-value { font-size: 28px; font-weight: 700; margin: 4px 0; }
+.rollover-timer-sub { font-size: 12px; color: var(--text-tertiary); }

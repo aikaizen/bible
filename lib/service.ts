@@ -406,6 +406,55 @@ async function ensureWeekReadingItem(
   );
 }
 
+/**
+ * References the community has actually engaged with:
+ *   1. the reading item a past week resolved to (the passage that was "the" reading), and
+ *   2. any proposal that received at least one vote.
+ *
+ * Deliberately NOT "every reference that ever appeared in reading_items": since every
+ * proposal now gets its own reading item, that would burn 4+ curated passages per
+ * group-week and exhaust the pool. Untouched suggestions stay recyclable.
+ */
+async function getEngagedReferences(client?: PoolClient): Promise<string[]> {
+  const rows = await dbQuery<{ reference: string }>(
+    `SELECT ri.reference
+       FROM reading_items ri
+       JOIN weeks w ON w.resolved_reading_id = ri.id
+     UNION
+     SELECT p.reference
+       FROM proposals p
+       JOIN votes v ON v.proposal_id = p.id`,
+    [],
+    client,
+  );
+  return rows.map((r) => r.reference);
+}
+
+/**
+ * Pick `count` seeds, falling back to the full catalogue for whatever the
+ * exclusion-filtered pool could not supply. Guarantees a week is never seedless
+ * while keeping the primary picks deterministic-by-date.
+ */
+function pickSeedsWithFallback(
+  count: number,
+  excluded: string[],
+  startDate?: string,
+): Array<{ reference: string; note: string }> {
+  const pick = (n: number, exclude: string[]) =>
+    startDate ? pickGlobalSeedsForDate(startDate, n, exclude) : pickSeedPassages(n, exclude);
+
+  const primary = pick(count, excluded);
+  if (primary.length >= count) return primary;
+
+  // Pool exhausted: retry the remainder against the whole catalogue, excluding
+  // only what we just picked so we never emit a duplicate reference.
+  const fallback = pick(
+    count - primary.length,
+    primary.map((s) => s.reference),
+  );
+  return [...primary, ...fallback];
+}
+
 async function insertSeedProposals(
   groupId: string,
   weekId: string,
@@ -414,17 +463,9 @@ async function insertSeedProposals(
   startDate?: string,
   client?: PoolClient,
 ): Promise<void> {
-  const pastReferences = await dbQuery<{ reference: string }>(
-    `SELECT DISTINCT ri.reference FROM reading_items ri`,
-    [],
-    client,
-  );
+  const alreadyRead = await getEngagedReferences(client);
 
-  const alreadyRead = pastReferences.map((r) => r.reference);
-
-  const seeds = startDate
-    ? pickGlobalSeedsForDate(startDate, count, alreadyRead)
-    : pickSeedPassages(count, alreadyRead);
+  const seeds = pickSeedsWithFallback(count, alreadyRead, startDate);
 
   for (const seed of seeds) {
     const proposal = await dbQueryOne<{ id: string }>(
@@ -1755,11 +1796,14 @@ export async function rerollSeedProposal(params: {
 }) {
   await requireAdmin(params.groupId, params.userId);
 
-  const proposal = await dbQueryOne<{ id: string; week_id: string; is_seed: boolean; week_status: WeekStatus }>(
-    `SELECT p.id, p.week_id, p.is_seed, w.status AS week_status
+  const proposal = await dbQueryOne<{ id: string; week_id: string; is_seed: boolean }>(
+    `SELECT p.id, p.week_id, p.is_seed
      FROM proposals p
      JOIN weeks w ON w.id = p.week_id
-     WHERE p.id = $1 AND w.group_id = $2 AND p.deleted_at IS NULL`,
+     WHERE p.id = $1 AND w.group_id = $2
+       AND p.deleted_at IS NULL
+       AND p.archived_at IS NULL
+       AND w.status != 'RESOLVED'`,
     [params.proposalId, params.groupId],
   );
 
@@ -1774,34 +1818,34 @@ export async function rerollSeedProposal(params: {
     throw new ServiceError("This passage has votes and can't be rerolled", 400);
   }
 
-  await dbQuery(`UPDATE proposals SET deleted_at = NOW() WHERE id = $1`, [params.proposalId]);
-
-  const [pastRefs, currentRefs] = await Promise.all([
-    dbQuery<{ reference: string }>(
-      `SELECT DISTINCT ri.reference FROM reading_items ri
-       JOIN weeks w ON w.id = ri.week_id WHERE w.group_id = $1`,
-      [params.groupId],
-    ),
+  // Find the replacement BEFORE removing anything, so an exhausted pool can never
+  // silently shrink the week's passage list.
+  const [engagedRefs, currentRefs] = await Promise.all([
+    getEngagedReferences(),
     dbQuery<{ reference: string }>(
       `SELECT reference FROM proposals WHERE week_id = $1 AND deleted_at IS NULL`,
       [proposal.week_id],
     ),
   ]);
 
-  const excluded = [...pastRefs.map((r) => r.reference), ...currentRefs.map((r) => r.reference)];
+  const excluded = [...engagedRefs, ...currentRefs.map((r) => r.reference)];
   const seeds = pickSeedPassages(1, excluded);
 
-  if (seeds.length > 0) {
-    const group = await getGroup(params.groupId);
-    const replacement = await dbQueryOne<{ id: string }>(
-      `INSERT INTO proposals(week_id, proposer_id, reference, note, is_seed)
-       VALUES ($1, $2, $3, $4, TRUE)
-       RETURNING id`,
-      [proposal.week_id, group.owner_id, seeds[0].reference, seeds[0].note],
-    );
-    if (replacement) {
-      await ensureReadingItemForProposal(proposal.week_id, replacement.id, seeds[0].reference);
-    }
+  if (seeds.length === 0) {
+    throw new ServiceError("No fresh passages available to swap in", 409);
+  }
+
+  await dbQuery(`UPDATE proposals SET deleted_at = NOW() WHERE id = $1`, [params.proposalId]);
+
+  const group = await getGroup(params.groupId);
+  const replacement = await dbQueryOne<{ id: string }>(
+    `INSERT INTO proposals(week_id, proposer_id, reference, note, is_seed)
+     VALUES ($1, $2, $3, $4, TRUE)
+     RETURNING id`,
+    [proposal.week_id, group.owner_id, seeds[0].reference, seeds[0].note],
+  );
+  if (replacement) {
+    await ensureReadingItemForProposal(proposal.week_id, replacement.id, seeds[0].reference);
   }
 
   return { ok: true };
