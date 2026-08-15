@@ -2097,18 +2097,21 @@ export default function Home() {
                           type="button"
                         >
                           Comments
-                          {p.commentCount > 0 && <span className="comment-count-inline">({p.commentCount})</span>}
+                          <span className="comment-count-inline">({p.commentCount})</span>
                           {p.unreadCount > 0 && <span className="unread-badge">{p.unreadCount}</span>}
                         </button>
-                        {(isAdmin || p.proposerId === selectedUserId) && !p.isSeed && (
+                        {isAdmin && !p.isSeed && (
                           <button
                             className="btn btn-danger btn-sm"
-                            onClick={() => void mutate(async () => {
-                              await api(`/api/groups/${groupId}/proposals`, {
-                                method: "DELETE",
-                                body: JSON.stringify({ proposalId: p.id }),
+                            onClick={() => {
+                              if (!confirm(`Are you sure you want to remove ${p.reference}?`)) return;
+                              void mutate(async () => {
+                                await api(`/api/groups/${groupId}/proposals`, {
+                                  method: "DELETE",
+                                  body: JSON.stringify({ proposalId: p.id }),
+                                });
                               });
-                            })}
+                            }}
                             disabled={submitting}
                             type="button"
                           >

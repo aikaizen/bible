@@ -718,7 +718,7 @@ export async function getGroupSnapshot(groupId: string, userId: string) {
     getGroup(groupId),
   ]);
 
-  const [members, proposals, votes, myVotes, readingItem, history, invite, pendingInvites, proposalCommentCounts, proposalReadingItems] = await Promise.all([
+  const [members, proposals, votes, myVotes, readingItem, history, invite, pendingInvites, proposalCommentCounts, proposalReadingItems, passageCommentCounts, annotationCounts, annotationReplyCounts] = await Promise.all([
     dbQuery<{
       id: string;
       name: string;
@@ -862,12 +862,46 @@ export async function getGroupSnapshot(groupId: string, userId: string) {
       `SELECT proposal_id, id FROM reading_items WHERE week_id = $1 AND proposal_id IS NOT NULL`,
       [week.id],
     ),
+    dbQuery<{ proposal_id: string; comment_count: string }>(
+      `SELECT ri.proposal_id, COUNT(*)::text AS comment_count
+       FROM comments c
+       JOIN reading_items ri ON ri.id = c.reading_item_id
+       WHERE ri.week_id = $1 AND ri.proposal_id IS NOT NULL AND c.deleted_at IS NULL
+       GROUP BY ri.proposal_id`,
+      [week.id],
+    ),
+    dbQuery<{ proposal_id: string; comment_count: string }>(
+      `SELECT ri.proposal_id, COUNT(*)::text AS comment_count
+       FROM annotations a
+       JOIN reading_items ri ON ri.id = a.reading_item_id
+       WHERE ri.week_id = $1 AND ri.proposal_id IS NOT NULL AND a.deleted_at IS NULL
+       GROUP BY ri.proposal_id`,
+      [week.id],
+    ),
+    dbQuery<{ proposal_id: string; comment_count: string }>(
+      `SELECT ri.proposal_id, COUNT(*)::text AS comment_count
+       FROM annotation_replies ar
+       JOIN annotations a ON a.id = ar.annotation_id
+       JOIN reading_items ri ON ri.id = a.reading_item_id
+       WHERE ri.week_id = $1 AND ri.proposal_id IS NOT NULL
+         AND ar.deleted_at IS NULL AND a.deleted_at IS NULL
+       GROUP BY ri.proposal_id`,
+      [week.id],
+    ),
   ]);
 
   // Build maps for comment counts and unread counts
-  const commentCountMap = new Map(proposalCommentCounts.map((r) => [r.proposal_id, Number(r.comment_count)]));
+  const commentCountMap = new Map<string, number>();
+  for (const row of [
+    ...proposalCommentCounts,
+    ...passageCommentCounts,
+    ...annotationCounts,
+    ...annotationReplyCounts,
+  ]) {
+    commentCountMap.set(row.proposal_id, (commentCountMap.get(row.proposal_id) ?? 0) + Number(row.comment_count));
+  }
   // Compute unread counts per proposal
-  const unreadCountsRaw = commentCountMap.size > 0
+  const unreadCountsRaw = proposalCommentCounts.length > 0
     ? await dbQuery<{ proposal_id: string; unread_count: string }>(
         `SELECT pc.proposal_id, COUNT(*)::text AS unread_count
          FROM proposal_comments pc
@@ -1229,9 +1263,8 @@ export async function removeProposal(params: { groupId: string; userId: string; 
   }
 
   const isAdmin = mapRoleWeight(member.role) >= mapRoleWeight("ADMIN");
-  const isOwner = proposal.proposer_id === params.userId;
-  if (!isAdmin && !isOwner) {
-    throw new ServiceError("Only admins or the proposer can remove this proposal", 403);
+  if (!isAdmin) {
+    throw new ServiceError("Only group admins can remove a passage", 403);
   }
 
   await dbQuery(`UPDATE proposals SET deleted_at = NOW() WHERE id = $1`, [params.proposalId]);
