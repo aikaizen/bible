@@ -5,6 +5,7 @@ import {
   castVote,
   createGroup,
   getGroupSnapshot,
+  resolveCurrentWeek,
   startNewVote,
 } from "@/lib/service";
 import { addGroupMember, createTestDb, createUser, type TestDb } from "@/tests/helpers/test-db";
@@ -22,7 +23,7 @@ describe("service lifecycle", () => {
     await testDb.close();
   });
 
-  it("creates an active week, auto-resolves when all members vote, and starts a new vote round", async () => {
+  it("creates an active week, keeps voting open until explicitly resolved, and starts a new vote round", async () => {
     const ownerId = await createUser(testDb.pool, { name: "Owner", email: "owner@example.com" });
     const memberId = await createUser(testDb.pool, { name: "Member", email: "member@example.com" });
 
@@ -45,7 +46,14 @@ describe("service lifecycle", () => {
     expect(firstVote.autoResolved).toBe(false);
 
     const secondVote = await castVote({ groupId: group.groupId!, userId: memberId, proposalId: targetProposalId });
-    expect(secondVote.autoResolved).toBe(true);
+    expect(secondVote.autoResolved).toBe(false);
+
+    // Voting alone must not end the week — it closes on the timer or by admin resolve.
+    const openWeek = await getGroupSnapshot(group.groupId!, ownerId);
+    expect(openWeek.week.status).toBe("VOTING_OPEN");
+
+    const resolved = await resolveCurrentWeek(group.groupId!, ownerId);
+    expect(resolved.status).toBe("RESOLVED");
 
     const latestWeek = await testDb.pool.query<{ status: string; proposal_id: string | null }>(
       `SELECT w.status::text, ri.proposal_id

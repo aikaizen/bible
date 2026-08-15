@@ -965,13 +965,10 @@ export default function Home() {
     void (async () => {
       try {
         setSubmitting(true);
-        const result = await api<{ ok: boolean; autoResolved?: boolean }>(`/api/groups/${groupId}/vote`, {
+        await api<{ ok: boolean; autoResolved?: boolean }>(`/api/groups/${groupId}/vote`, {
           method: "POST",
           body: JSON.stringify({ proposalId }),
         });
-        if (result.autoResolved) {
-          setTab("reading");
-        }
         await refreshData();
       } catch (err) {
         setError(err instanceof Error ? err.message : "Vote failed");

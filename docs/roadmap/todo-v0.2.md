@@ -12,6 +12,9 @@ Target release: `v0.2`
 
 Captured 2026-08-14. Requirements as stated, not yet specced.
 
+- [x] **Band-aid: voting must not end the week or switch the reading** (fixed 2026-08-14). Root causes: (a) castVote auto-resolved the week the moment all members had voted — a lone member's single vote instantly resolved the week; (b) the client jumped to the Reader tab on auto-resolve; (c) syncReadingToVoteLeader re-anchored the week's single reading item in place on every leader change, silently re-attaching verse comments to a different passage. All three removed; weeks now close only on the voting timer or explicit admin resolve. The full fix is the redesign below.
+- [ ] **Underlying data-model flaw (addressed by redesign below):** each week has exactly ONE reading_item row (`ON CONFLICT (week_id) DO UPDATE`) and comments/annotations hang off it by id while its reference is mutable. Any reference swap orphans or misattaches discussion. The P0 model — multiple passages in play per week, each independently readable/commentable — requires one reading item per proposal, not per week.
+
 - [ ] **Open proposals to all members.** Any member of a group can propose specific passages — not admin-only.
 - [ ] **Proposals are visible to everyone, capped per user.** Any proposed passage automatically appears for all users. Each user can propose up to 2 passages per week.
 - [ ] **Partial-verse highlighting in Reader.** Highlighting text must not auto-expand to the full verse when the selection is incomplete — highlight only the selected words. The comment still reads "Comment on verse 5" and stays tagged as such in the comments at the bottom.

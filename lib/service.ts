@@ -1195,25 +1195,12 @@ export async function castVote(params: { groupId: string; userId: string; propos
     [week.id, params.proposalId, params.userId],
   );
 
-  await syncReadingToVoteLeader(week.id);
-
-  // Auto-resolve: check if all members have voted
-  const [voteResult, memberResult] = await Promise.all([
-    dbQueryOne<{ count: string }>(`SELECT COUNT(*)::text AS count FROM votes WHERE week_id = $1`, [week.id]),
-    dbQueryOne<{ count: string }>(`SELECT COUNT(*)::text AS count FROM group_members WHERE group_id = $1`, [params.groupId]),
-  ]);
-  const voteCount = Number(voteResult?.count ?? 0);
-  const memberCount = Number(memberResult?.count ?? 0);
-
-  if (voteCount >= memberCount && memberCount > 0) {
-    const group = await getGroup(params.groupId);
-    const winner = await calculateWinner(week.id, group.tie_policy);
-    if (winner.proposalId && winner.status !== "PENDING_MANUAL") {
-      await finalizeWeek(week.id, winner.proposalId);
-      return { ok: true, autoResolved: true };
-    }
-  }
-
+  // NOTE: Voting deliberately does NOT resolve the week or switch the shared
+  // reading. Weeks close on the voting timer (maybeAutoResolveWeek) or by
+  // explicit admin resolve. Mid-week re-anchoring of the reading item
+  // (syncReadingToVoteLeader) silently re-attached verse comments to a
+  // different passage, and all-members-voted auto-resolve ended the week the
+  // moment a lone member voted.
   return { ok: true, autoResolved: false };
 }
 
