@@ -32,7 +32,7 @@ describe("week cadence", () => {
     await testDb.close();
   });
 
-  it("anchors the new week to the calendar week, not voting_duration_hours", async () => {
+  it("anchors the new week to the Friday 21:00 boundary, not voting_duration_hours", async () => {
     const ownerId = await createUser(testDb.pool, { name: "Owner", email: "cadence@example.com" });
 
     // 68h is the production default; under the old rollover this made the new
@@ -47,14 +47,16 @@ describe("week cadence", () => {
     const first = await getGroupSnapshot(group.groupId!, ownerId);
     const firstWeekId = first.week.id;
 
-    // Freshly created week: close is already in the future and a full week out.
+    // Freshly created week: close is strictly in the future and at most a week
+    // out. (With the Friday 21:00 cadence the distance depends on wall-clock
+    // time, so "strictly future, <= 7 days" is the loosest always-true bound.)
     const created = await testDb.pool.query<{ close_at: string }>(
       `SELECT voting_close_at::text AS close_at FROM weeks WHERE id = $1`,
       [firstWeekId],
     );
     const createdCloseMs = new Date(created.rows[0].close_at).getTime();
     expect(createdCloseMs).toBeGreaterThan(Date.now());
-    expect(createdCloseMs - Date.now()).toBeGreaterThan(6 * DAY_MS);
+    expect(createdCloseMs - Date.now()).toBeLessThanOrEqual(7 * DAY_MS);
 
     // Force the week past due right on a boundary-ish instant and roll over.
     await testDb.pool.query(
@@ -72,9 +74,9 @@ describe("week cadence", () => {
     // Strictly in the future — a rollover firing on the boundary must never
     // reproduce the boundary it just crossed.
     expect(rolledCloseMs).toBeGreaterThan(Date.now());
-    // ~a week out, and in particular far beyond 68 hours (2.83 days).
-    expect(rolledCloseMs - Date.now()).toBeGreaterThan(6 * DAY_MS);
-    expect(rolledCloseMs - Date.now()).toBeLessThanOrEqual(8 * DAY_MS);
+    // At most one cadence period out — never NOW() + voting_duration_hours,
+    // which the guarded close expression cannot produce.
+    expect(rolledCloseMs - Date.now()).toBeLessThanOrEqual(7 * DAY_MS);
   });
 
   it("still suggests a passage that only exists in another group's archived week", async () => {

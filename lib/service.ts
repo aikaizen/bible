@@ -325,20 +325,28 @@ async function sendVerseReplyEmails(params: {
   );
 }
 
-// A "week" is a calendar week in the group's timezone. It opens at the current
-// week's Monday 00:00 and closes at the START of the next calendar week
-// (next Monday 00:00), which is always strictly in the future — including for a
-// rollover that fires right on a Monday boundary. `voting_duration_hours` is
-// deliberately NOT used here: it is a vestigial per-group setting and using it
-// made "weeks" cycle every 68 hours for default-configured groups.
+// A "week" runs until the next FRIDAY 21:00 (9pm) in the group's timezone.
+// The close instant is always strictly in the future: at exactly Friday 21:00
+// local the `>` comparison is false, so the close jumps to the following Friday
+// — a rollover firing right on the boundary can never reproduce the boundary it
+// just crossed. `start_date` is the group-local date the week was opened (not
+// the Monday of the calendar week), so two consecutive weeks never share a
+// start_date and seed determinism (pickGlobalSeedsForDate) stays distinct.
+// `voting_duration_hours` is deliberately NOT used here: it is a vestigial
+// per-group setting and using it made "weeks" cycle every 68 hours for
+// default-configured groups.
 async function getCurrentWeekMeta(
   groupId: string,
   client?: PoolClient,
 ): Promise<{ startDate: string; closeAt: string }> {
   const row = await dbQueryOne<{ start_date: string; close_at: string }>(
     `SELECT
-       date_trunc('week', now() AT TIME ZONE g.timezone)::date::text AS start_date,
-       ((date_trunc('week', now() AT TIME ZONE g.timezone) + interval '7 days') AT TIME ZONE g.timezone)::text AS close_at
+       (now() AT TIME ZONE g.timezone)::date::text AS start_date,
+       ((CASE
+           WHEN date_trunc('week', now() AT TIME ZONE g.timezone) + interval '4 days 21 hours' > (now() AT TIME ZONE g.timezone)
+           THEN date_trunc('week', now() AT TIME ZONE g.timezone) + interval '4 days 21 hours'
+           ELSE date_trunc('week', now() AT TIME ZONE g.timezone) + interval '11 days 21 hours'
+         END) AT TIME ZONE g.timezone)::text AS close_at
      FROM groups g
      WHERE g.id = $1`,
     [groupId],
@@ -637,8 +645,8 @@ async function rolloverGroupWeek(
     );
 
     const group = await getGroup(groupId, client);
-    // Anchor the new week to the calendar week in the group's timezone: it runs
-    // until the start of the NEXT calendar week (next Monday 00:00), never
+    // Anchor the new week to the group's timezone: it runs until the next
+    // Friday 21:00 local (strictly in the future), never
     // NOW() + voting_duration_hours.
     const meta = await getCurrentWeekMeta(groupId, client);
     const newWeek = await dbQueryOne<{ id: string; start_date: string }>(

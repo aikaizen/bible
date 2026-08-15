@@ -210,9 +210,11 @@ export async function createTestDb(): Promise<TestDb> {
     }
 
     // pg-mem cannot parse `date_trunc('week', ...) AT TIME ZONE ...`, so the
-    // calendar-week boundary query (getCurrentWeekMeta) is stubbed. The stub
-    // stands in for "start of the next calendar week in the group's timezone":
-    // always strictly in the future and at most one week out.
+    // week-boundary query (getCurrentWeekMeta) is stubbed. The stub stands in
+    // for "next Friday 21:00 in the group's timezone": the only invariants that
+    // hold for every wall-clock instant are that the close is strictly in the
+    // future and at most 7 days out. 168h is a valid instance of that (the
+    // boundary case, i.e. running exactly at Friday 21:00 local).
     if (sql.includes("date_trunc('week'") && sql.includes("FROM groups g")) {
       return `
         SELECT
