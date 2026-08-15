@@ -519,9 +519,9 @@ export default function Home() {
     userId: string,
     readingItemId: string,
   ): "NOT_MARKED" | "PLANNED" | "READ" {
-    return marks.find((m) =>
-      m.userId === userId && (m.readingItemId == null || m.readingItemId === readingItemId),
-    )?.status ?? "NOT_MARKED";
+    const exact = marks.find((m) => m.userId === userId && m.readingItemId === readingItemId);
+    if (exact) return exact.status;
+    return marks.find((m) => m.userId === userId && m.readingItemId == null)?.status ?? "NOT_MARKED";
   }
 
   const myReadStatus = useMemo(() => {
@@ -1290,14 +1290,33 @@ export default function Home() {
     });
   }
 
-  function markPassageRead(readingItemId: string) {
+  function applyLocalReadMark(
+    readingItemId: string,
+    status: "NOT_MARKED" | "PLANNED" | "READ",
+  ) {
     if (!selectedUserId) return;
-    setMyReadByItem((prev) => ({ ...prev, [readingItemId]: "READ" }));
-    void (async () => {
+    setMyReadByItem((prev) => ({ ...prev, [readingItemId]: status }));
+    setSnapshot((prev) => {
+      if (!prev) return prev;
+      const nextMarks = prev.readMarks.filter(
+        (m) => !(m.userId === selectedUserId && m.readingItemId === readingItemId),
+      );
+      nextMarks.push({ userId: selectedUserId, readingItemId, status });
+      return { ...prev, readMarks: nextMarks };
+    });
+  }
+
+  function setPassageReadStatus(
+    readingItemId: string,
+    status: "NOT_MARKED" | "PLANNED" | "READ",
+  ) {
+    if (!selectedUserId) return;
+    applyLocalReadMark(readingItemId, status);
+    void mutate(async () => {
       try {
         await api(`/api/reading-items/${readingItemId}/read-mark`, {
           method: "POST",
-          body: JSON.stringify({ status: "READ" }),
+          body: JSON.stringify({ status }),
         });
         void loadProfile();
       } catch (err) {
@@ -1306,35 +1325,18 @@ export default function Home() {
           delete next[readingItemId];
           return next;
         });
-        setError(err instanceof Error ? err.message : "Failed to mark as read");
-      }
-    })();
-  }
-
-  function onReadMark(status: "NOT_MARKED" | "PLANNED" | "READ") {
-    if (!selectedUserId || !currentReading) return;
-    const itemId = currentReading.id;
-    if (status === "READ") {
-      markPassageRead(itemId);
-      return;
-    }
-    setMyReadByItem((prev) => ({ ...prev, [itemId]: status }));
-    void mutate(async () => {
-      try {
-        await api(`/api/reading-items/${itemId}/read-mark`, {
-          method: "POST",
-          body: JSON.stringify({ status }),
-        });
-        void loadProfile();
-      } catch (err) {
-        setMyReadByItem((prev) => {
-          const next = { ...prev };
-          delete next[itemId];
-          return next;
-        });
         throw err;
       }
     });
+  }
+
+  function markPassageRead(readingItemId: string) {
+    setPassageReadStatus(readingItemId, "READ");
+  }
+
+  function onReadMark(status: "NOT_MARKED" | "PLANNED" | "READ") {
+    if (!currentReading) return;
+    setPassageReadStatus(currentReading.id, status);
   }
 
   async function onAddFromNotification(item: NotificationItem) {
@@ -2427,7 +2429,9 @@ export default function Home() {
 
                           <div>
                             {snapshot.members.map((m) => {
-                              const st = markForItem(snapshot.readMarks, m.id, currentReading.id);
+                              const st = m.id === selectedUserId
+                                ? myReadStatus
+                                : markForItem(snapshot.readMarks, m.id, currentReading.id);
                               return (
                                 <div key={m.id} className="member-status">
                                   <span className="avatar avatar-sm" style={{ background: colorFor(m.id) }}>{getAvatar(m.name)}</span>
